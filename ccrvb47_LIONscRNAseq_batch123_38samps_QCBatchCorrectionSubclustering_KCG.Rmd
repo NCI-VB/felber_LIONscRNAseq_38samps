@@ -1,0 +1,3614 @@
+---
+title: "CCRVB-47 Felber LION scRNA-seq in macaques: batch 1, 2 & 3+ (all 38 samples) - QC, Batch Correction & Subclustering"
+author: "Kate Goldfarbmuren"
+date: "`r Sys.Date()`"
+params:
+   ### project folder on biowulf
+  parent_dir: "~/../../Volumes/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/ForMS"
+  input_dir: "~/../../Volumes/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/filtered" ### where pre-filtered .rds are for QC viz
+  study_name: "ccrvb47_LIONscRNAseq_batch123_38samps"
+  eval_save_so: FALSE #TRUE if the first time, otherwise don't have to rerun since takes a while
+  eval_set_so: TRUE #FALSE if save_so is true, otherwise TRUE
+  evalSubclustering: FALSE #TRUE to run subclustering, set to FALSE after subclustering objects generated
+  evalSaveSubSOs: FALSE #TRUE to save subclustered subset objects with set resolution, set to FALSE after each subclustered subset annotation res set
+  evalSubsToFull: FALSE #TRUE to add subclusters from subsets back to full object, set to FALSE subclusters have been added back to full object
+  evalTissTrimm: FALSE #TRUE to trim out cell populations with few cells in one tissue, set to FALSE after tissue trimming completed
+  evalAddFINALNAMES: FALSE #TRUE to add final names annotation to objec, set to FALSE after final names have already been added
+  full_code_path: "~/../../Volumes/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/ccrvb47_LIONscRNAseq_KCG.Rmd" ## contains the old bones sc pipeline runs to QC and batch correct
+  code_path: "~/../../Volumes/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/ccrvb47_LIONscRNAseq_batch123_38samps_QCBatchCorrectionSubclustering_KCG.Rmd" ## this file
+  functions_path: "~/../../Volumes/NCI_VB/goldfarbmurenkc/github/VaccineBranch/general"
+  lib_loc_to_use: "/data/goldfarbmurenkc/R/rhel8/4.4/"
+output: 
+   #   "+RTS", "-K800m",
+   #   "-RTS"
+   # ]
+  html_document:
+    toc: TRUE
+   #  pandoc_args: [
+editor_options:
+  
+  
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+# more substantial setup for your document
+knitr::opts_chunk$set(echo = FALSE, 
+                      fig.width = 9, 
+                      fig.height = 9, 
+                      dev = "png", #change to cairo_pdf to generate pdfs
+                      cache = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+
+#https://github.com/rstudio/DT/issues/867
+DT::datatable(
+  matrix(), extensions="Buttons",
+  options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                 iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All")))
+)
+
+
+
+eval_save_so <- params$eval_save_so
+eval_set_so <- params$eval_set_so
+evalSubclustering <- params$evalSubclustering
+evalSaveSubSOs <- params$evalSaveSubSOs
+evalSubsToFull <- params$evalSubsToFull
+evalTissTrimm <- params$evalTissTrimm
+evalAddFINALNAMES <- params$evalAddFINALNAMES
+
+```
+
+
+```{r paths_lists, warning=FALSE, include=FALSE}
+############################################################
+# project information
+############################################################
+## for biowulf (normally used)
+parent_dir <- params$parent_dir
+
+## this is where I put anything from nidap or biowulf to my computer from this run, also contains the annotated seurat obj rds, quicker to load from locally
+input_dir <- params$input_dir
+
+outputIMAGES_dir <- paste0(parent_dir,"/IMAGES")
+outputTABLES_dir <- paste0(parent_dir,"/TABLES")
+outputRData_dir <- paste0(parent_dir,"/RData")
+outputEnrichr_dir <- paste0(parent_dir,"/TABLES/Enrichr")
+output_dirs <- c(outputIMAGES_dir, outputTABLES_dir, outputRData_dir, outputEnrichr_dir)
+
+for (curr_dir in output_dirs){
+  if(!(file.exists(file.path(curr_dir)))){
+    dir.create(file.path(curr_dir), showWarnings = TRUE)
+  }
+}
+code_path <- params$code_path
+functions_path <- params$functions_path
+
+```
+
+
+```{r source_pkgs, warning=FALSE, include=FALSE}
+############################################################
+# packages & functions
+############################################################
+# package list
+list.of.packages = c(
+  "openxlsx", "DT", "dichromat", "tidyverse", "strex",
+  "circlize", "Seurat", "RColorBrewer", "ggbeeswarm", "ggpubr","dittoSeq",
+  "gridExtra", "ggrepel", "cowplot", "htmltools","janitor"
+)
+#install as needed
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) BiocManager::install(new.packages)
+
+## MAST directly from github
+#devtools::install_github("RGLab/MAST")
+#remotes::install_github("satijalab/seurat-wrappers")
+
+
+# source common functions, need to have NCI_VB mounted to run this
+source(file.path(functions_path,"CommonFunctions_KCG.R"))
+
+# Rmd functions
+source(file.path(functions_path,'Rmd_functions_KCG.R'))
+
+# load packages
+invisible(lapply(list.of.packages, library, character.only = TRUE))
+#library(MAST)
+#library(SeuratWrappers)
+
+```
+
+
+# {.tabset}
+
+
+``` {bash run_scRNAseq_pipeline_hg38_PBMC3, eval = FALSE}
+### batch 3 of PBMC without dead cell removal that appeared to have selectively and inconsistantly depleted the myeloid cells, and with in house 10x capture. Includes one sample (1_MC73_09132023) that is replicate of POST with the in-house processing, rest are Day8. Data rec'd 11/7/24. 
+################# set up as of 2/27/23 (will likely get more automated) ####################
+
+################ using hg38 and seurat_preprocess ##############
+
+
+#### in terminal from biowulf (no interactive session needed)
+######## 1. generate working directory for the pipeline
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG
+mkdir singleCell_pipeline_241112_hg38
+cd singleCell_pipeline_241112_hg38
+
+######## 2. generate symlinks to input filepath structure , only for the new PBMC3 datasets, will run integration on subfolders including the PBMC2
+mkdir cellRangerOut
+cd cellRangerOut
+mkdir MC73_PBMC3_POST
+mkdir MC73_PBMC3_POST/outs
+
+mkdir MC73_PBMC3_DAY8
+mkdir MC73_PBMC3_DAY8/outs
+
+mkdir MF30_PBMC3_DAY8
+mkdir MF30_PBMC3_DAY8/outs
+
+mkdir MF07_PBMC3_DAY8
+mkdir MF07_PBMC3_DAY8/outs
+
+
+
+### extract only the .h5 from the count.tar; be sure in /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/
+### to see what's there:
+#tar -tvf /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/2_MC73_09192023_count.tar
+cd /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/1_MC73_09132023_count.tar 1_MC73_09132023/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/2_MC73_09192023_count.tar 2_MC73_09192023/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/3_MF30_09192023_count.tar 3_MF30_09192023/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/4_MF07_09192023_count.tar 4_MF07_09192023/outs/filtered_feature_bc_matrix.h5
+
+
+## symlink .h5 from rawdata into these pipeline folders
+### move to the cellranger dir
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/cellRangerOut
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/1_MC73_09132023/outs/filtered_feature_bc_matrix.h5 MC73_PBMC3_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/2_MC73_09192023/outs/filtered_feature_bc_matrix.h5 MC73_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/3_MF30_09192023/outs/filtered_feature_bc_matrix.h5 MF30_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/4_MF07_09192023/outs/filtered_feature_bc_matrix.h5 MF07_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+
+#### check files are teal not red with ls MF07_PBMC3_DAY8/outs/ etc.
+
+
+
+
+######## 3. generate groups.tab edit to be below
+## return to pipeline dir
+cd ../
+nano groups.tab
+## format is below
+#<sampleID> \t <expGroup> \t <sampleAlias> \t <dataType:gex/citeseq/atac/vdj>
+## use tab key and return key to separate columns and rows, respectively
+##### second column should contain the combined group with 4 levels
+MC73_PBMC3_POST PBMC3_POST    MC73_PBMC3_POST gex
+MC73_PBMC3_DAY8 PBMC3_DAY8    MC73_PBMC3_DAY8 gex
+MF30_PBMC3_DAY8 PBMC3_DAY8    MF30_PBMC3_DAY8 gex
+MF07_PBMC3_DAY8 PBMC3_DAY8    MF07_PBMC3_DAY8 gex
+
+## to save, ctrl X, Y enter
+
+## the above was used for the initial QC of each sample then moved to groupsQC.tab
+cp groups.tab groupsQC.tab
+## then for integration, made groups.tab have all the samples
+nano groups.tab
+MF07_PBMC2_PRE PBMC2_PRE    MF07_PBMC2_PRE gex
+MF30_PBMC2_PRE PBMC2_PRE    MF30_PBMC2_PRE gex
+MC73_PBMC2_PRE PBMC2_PRE    MC73_PBMC2_PRE gex
+MF07_PBMC2_POST PBMC2_POST    MF07_PBMC2_POST gex
+MF30_PBMC2_POST PBMC2_POST    MF30_PBMC2_POST gex
+MC73_PBMC2_POST PBMC2_POST    MC73_PBMC2_POST gex
+MC73_PBMC3_POST PBMC3_POST    MC73_PBMC3_POST gex
+MC73_PBMC3_DAY8 PBMC3_DAY8    MC73_PBMC3_DAY8 gex
+MF30_PBMC3_DAY8 PBMC3_DAY8    MF30_PBMC3_DAY8 gex
+MF07_PBMC3_DAY8 PBMC3_DAY8    MF07_PBMC3_DAY8 gex
+
+
+######## 4. generate contrasts.tab ---> do not need to generate this since not specifying contrasts
+#nano contrasts.tab
+#IL15    Control ## be sure to specify the order that you're expecting
+## additional lines for additional comparisons
+
+######## 5. generate additonal directories for outputs
+mkdir filtered
+mkdir QC
+mkdir QC/images
+mkdir integration
+mkdir integration/images
+### separate dirs for each set of samples
+mkdir integration/images_PBMC3_9samps
+mkdir integration/images_PBMC3_10samps
+mkdir integration/images_PBMC3_techreps
+
+
+
+
+
+
+######## 6. clone scripts from github into working dir & copy several from hierarchy "loose" into working directory
+git clone https://github.com/wong-nw/scRNASeq_2023.git # makes scRNAseq_2023 dir
+cp -r scRNASeq_2023/workflow/ ./workflow/ #needs -r to copy the dir
+cp scRNASeq_2023/bashScripts/qcRun.swarm ./qcRun.swarm
+cp scRNASeq_2023/bashScripts/setupQC.bash ./setupQC.bash
+cp scRNASeq_2023/bashScripts/run* ./
+
+
+
+
+######## 7. edit scripts for current study design
+#### the following a and b were not used in the singleCell_pipeline_240301 run
+## 7a. qcRun.swarm - may be better to start this one from scratch if has very few lines
+rm qcRun.swarm #remove old version
+nano qcRun.swarm 
+## one line per sample
+bash setupQC.bash MC73_PBMC3_POST
+bash setupQC.bash MC73_PBMC3_DAY8
+bash setupQC.bash MF30_PBMC3_DAY8
+bash setupQC.bash MF07_PBMC3_DAY8
+
+
+## 7b. setupQC.bash
+nano setupQC.bash
+# be sure R 4.2 (done, no change)
+# set R script to be scrna_QC.R (done, no change)
+# set reference genome (hg38 HPCA)
+# *** don't comment out init scRNA4, or activate scRNA4 & add
+export TMPDIR=/lscratch/$SLURM_JOB_ID
+
+module purge
+module load R/4.2
+
+if [[ ! -d /data/NCI_VB/$USER/R_libs/4.2 ]]; then
+                  mkdir /data/NCI_VB/$USER/R_libs/4.2
+fi
+export R_LIBS_USER="/data/NCI_VB/$USER/R_libs/4.2"
+
+#Rscript workflow/scripts/scrna_QC.R cellRangerOut/ QC/ $1 0.2,0.4,0.6,0.8,1.0,1.2,1.4 hg38 HPCA
+
+
+
+## 7k. workflow/scripts/scRNA_QC.Rmd
+#also comment out library(magick)
+nano workflow/scripts/scRNA_QC.Rmd
+
+
+
+
+######## 8. run QC (swarm job submission for scRNA_QC.Rmd) 
+## should be in pipeline directory
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38
+swarm -g 96 -t 16 --time 12:00:00 --partition ccr,norm -f qcRun.swarm
+#40427640 @4:37pm EST 11/12/24
+newwall --jobid 40427640 --time 02-00:00:00
+#_0 (MC73_PBMC3_POST) finished in 46 min, 
+## can tell when successfully completed because the following shows an .rds for each sample
+#ls /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/filtered
+
+ls filtered ### should have 4 rds
+
+## once done, may need to copy these rds off biowulf for additional analysis VERY SLOW TO OPEN IN CONSOLE FROM BIOWULF
+## can view reports in QC folder
+#ls QC
+
+
+############# pick up integration once have all the samples in run_scRNAseq_pipeline_hg38_batch45_12 chunk
+
+
+######## copy scripts to code dir to push to github
+# make new dir with ccrvb# and pipeline date
+mkdir /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/*.tab /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38/
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/*.bash /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38/
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/*.swarm /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38/
+cp -r /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/workflow/ /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38/
+# push to github ( did 12/17/24)
+cd /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/
+git status
+git add Felber/pipeline_runs/ccrvb47_singleCell_pipeline_241112_hg38/
+git commit -m "initial post"
+git push
+
+
+
+######## moved rds to my computer for easy loading (took 30+ min)
+
+### from
+#/data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/integration/
+### to
+#/Documents/BarbaraFelber/ccrvb47_LIONscRNAseq_KCG/RData/
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+``` {bash run_scRNAseq_pipeline_hg38_batch45_12, eval = FALSE}
+### batch 4 and 5 of PBMC/LN without dead cell removal that appeared to have selectively and inconsistantly depleted the myeloid cells, and with in house 10x capture. Includes one sample (MB59_1/10/23_PB) that is replicate of PRE between batch 4 and 5, rest are replicates of batch 1 or 2, including DAY8. Data rec'd  2/6/25
+
+### also re-QC batch 1 (12 samples, 6 PBMC/6 LN) and batch 2 (6 PBMC2 samples), since re-run on cellranger 8.1.0. Data rec'd 2/10/25
+################# set up as of 2/27/23 (will likely get more automated) ####################
+
+################ using hg38 and seurat_preprocess ##############
+
+
+#### in terminal from biowulf (no interactive session needed)
+######## 1. generate working directory for the pipeline
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG
+mkdir singleCell_pipeline_20250210_hg38_KCG ### replace with date
+cd singleCell_pipeline_20250210_hg38_KCG
+
+######## 2. generate symlinks to input filepath structure 
+## call PBMC3 and LN3 for batch3 wetlab method
+mkdir cellRangerOut
+cd cellRangerOut
+## R4
+mkdir MB59_LN3_PRE
+mkdir MB59_LN3_PRE/outs
+
+mkdir MB59_LN3_DAY8
+mkdir MB59_LN3_DAY8/outs
+
+mkdir MC90_LN3_PRE
+mkdir MC90_LN3_PRE/outs
+
+mkdir MC90_LN3_DAY8
+mkdir MC90_LN3_DAY8/outs
+
+mkdir MB59_PBMC3_PRE
+mkdir MB59_PBMC3_PRE/outs
+
+mkdir MB59_PBMC3_DAY8
+mkdir MB59_PBMC3_DAY8/outs
+
+mkdir MC90_PBMC3_PRE
+mkdir MC90_PBMC3_PRE/outs
+
+mkdir MC90_PBMC3_DAY8
+mkdir MC90_PBMC3_DAY8/outs
+
+
+## R5
+mkdir MF30_LN3_PRE
+mkdir MF30_LN3_PRE/outs
+
+mkdir MF30_LN3_POST
+mkdir MF30_LN3_POST/outs
+
+mkdir MC90_LN3_POST
+mkdir MC90_LN3_POST/outs
+
+mkdir MC98_LN3_POST
+mkdir MC98_LN3_POST/outs
+
+mkdir MC98_LN3_DAY8
+mkdir MC98_LN3_DAY8/outs
+
+mkdir MB59_PBMC3b_PRE
+mkdir MB59_PBMC3b_PRE/outs
+
+mkdir MB59_PBMC3_POST
+mkdir MB59_PBMC3_POST/outs
+
+mkdir MC90_PBMC3_POST
+mkdir MC90_PBMC3_POST/outs
+
+
+##### and for batch 1
+mkdir MB59_PBMC_PRE
+mkdir MB59_PBMC_PRE/outs
+
+mkdir MC90_PBMC_PRE
+mkdir MC90_PBMC_PRE/outs
+
+mkdir MC98_PBMC_PRE
+mkdir MC98_PBMC_PRE/outs
+
+mkdir MB59_PBMC_POST
+mkdir MB59_PBMC_POST/outs
+
+mkdir MC90_PBMC_POST
+mkdir MC90_PBMC_POST/outs
+
+mkdir MC98_PBMC_POST
+mkdir MC98_PBMC_POST/outs
+
+
+mkdir MB59_LN_PRE
+mkdir MB59_LN_PRE/outs
+
+mkdir MC90_LN_PRE
+mkdir MC90_LN_PRE/outs
+
+mkdir MC98_LN_PRE
+mkdir MC98_LN_PRE/outs
+
+mkdir MB59_LN_POST
+mkdir MB59_LN_POST/outs
+
+mkdir MC90_LN_POST
+mkdir MC90_LN_POST/outs
+
+mkdir MC98_LN_POST
+mkdir MC98_LN_POST/outs
+
+# batch2
+mkdir MF07_PBMC2_PRE
+mkdir MF07_PBMC2_PRE/outs
+
+mkdir MF30_PBMC2_PRE
+mkdir MF30_PBMC2_PRE/outs
+
+mkdir MC73_PBMC2_PRE
+mkdir MC73_PBMC2_PRE/outs
+
+mkdir MF07_PBMC2_POST
+mkdir MF07_PBMC2_POST/outs
+
+mkdir MF30_PBMC2_POST
+mkdir MF30_PBMC2_POST/outs
+
+mkdir MC73_PBMC2_POST
+mkdir MC73_PBMC2_POST/outs
+
+#### and also batch3 to complete the set, since added prefilter.rds saved so can compare QC across the whole batch
+mkdir MC73_PBMC3_POST
+mkdir MC73_PBMC3_POST/outs
+
+mkdir MC73_PBMC3_DAY8
+mkdir MC73_PBMC3_DAY8/outs
+
+mkdir MF30_PBMC3_DAY8
+mkdir MF30_PBMC3_DAY8/outs
+
+mkdir MF07_PBMC3_DAY8
+mkdir MF07_PBMC3_DAY8/outs
+
+
+### extract only the .h5 from the count.tar; be sure in /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/
+### to see what's there:
+#tar -tvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/2_MC73_09192023_count.tar
+cd /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/1_MB59_010323_LN_count.tar 1_MB59_010323_LN/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/2_MB59_021423_LN_count.tar 2_MB59_021423_LN/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/3_MC90_010323_LN_count.tar 3_MC90_010323_LN/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/4_MC90_021423_LN_count.tar 4_MC90_021423_LN/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/5_MB59_011023_PB_count.tar 5_MB59_011023_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/6_MB59_021423_PB_count.tar 6_MB59_021423_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/7_MC90_011023_PB_count.tar 7_MC90_011023_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/8_MC90_021423_PB_count.tar 8_MC90_021423_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/9_MF30_112421_L_count.tar 9_MF30_112421_L/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/10_MF30_091323_L_count.tar 10_MF30_091323_L/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/11_MC90_091323_L_count.tar 11_MC90_091323_L/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/12_MC98_091323_L_count.tar 12_MC98_091323_L/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/13_MC98_021423_L_count.tar 13_MC98_021423_L/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/14_MB59_011023_PB_count.tar 14_MB59_011023_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/15_MB59_091323_PB_count.tar 15_MB59_091323_PB/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/16_MC90_091323_PB_count.tar 16_MC90_091323_PB/outs/filtered_feature_bc_matrix.h5
+
+
+#### BATCH1
+cd /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/1_F89_MB59_1_10_23_count.tar 1_F89_MB59_1_10_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/2_F89_MC90_1_10_23_count.tar 2_F89_MC90_1_10_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/3_F89_MC98_1_10_23_count.tar 3_F89_MC98_1_10_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/4_F89_MB59_9_13_23_count.tar 4_F89_MB59_9_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/5_F89_MC90_9_13_23_count.tar 5_F89_MC90_9_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/6_F89_MC98_9_13_23_count.tar 6_F89_MC98_9_13_23/outs/filtered_feature_bc_matrix.h5
+
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/7_F89_MB59_2_1_3_23_count.tar 7_F89_MB59_2_1_3_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/8_F89_MC90_2_1_3_23_count.tar 8_F89_MC90_2_1_3_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/9_F89_MC98_2_1_3_23_count.tar 9_F89_MC98_2_1_3_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/10_F89_MB59_2_9_13_23_count.tar 10_F89_MB59_2_9_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/11_F89_MC90_2_9_13_23_count.tar 11_F89_MC90_2_9_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/12_F89_MC98_2_9_13_23_count.tar 12_F89_MC98_2_9_13_23/outs/filtered_feature_bc_matrix.h5
+
+
+
+### BATCH2" extract only the .h5 from the count.tar; be sure in  the dir with the tar
+cd /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/1_MF07_11_24_21_count.tar 1_MF07_11_24_21/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/2_MF30_11_24_21_count.tar 2_MF30_11_24_21/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/3_MC73_11_24_21_count.tar 3_MC73_11_24_21/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/4_MF07_09_13_23_count.tar 4_MF07_09_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/5_MF30_09_13_23_count.tar 5_MF30_09_13_23/outs/filtered_feature_bc_matrix.h5
+tar -xvf /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/6_MC73_09_13_23_count.tar 6_MC73_09_13_23/outs/filtered_feature_bc_matrix.h5
+
+
+
+
+
+
+## symlink .h5 from rawdata into these pipeline folders
+### move to the cellranger dir
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/cellRangerOut
+## R4
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/1_MB59_010323_LN/outs/filtered_feature_bc_matrix.h5 MB59_LN3_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/2_MB59_021423_LN/outs/filtered_feature_bc_matrix.h5 MB59_LN3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/3_MC90_010323_LN/outs/filtered_feature_bc_matrix.h5 MC90_LN3_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/4_MC90_021423_LN/outs/filtered_feature_bc_matrix.h5 MC90_LN3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/5_MB59_011023_PB/outs/filtered_feature_bc_matrix.h5 MB59_PBMC3_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/6_MB59_021423_PB/outs/filtered_feature_bc_matrix.h5 MB59_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/7_MC90_011023_PB/outs/filtered_feature_bc_matrix.h5 MC90_PBMC3_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/8_MC90_021423_PB/outs/filtered_feature_bc_matrix.h5 MC90_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+## R5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/9_MF30_112421_L/outs/filtered_feature_bc_matrix.h5 MF30_LN3_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/10_MF30_091323_L/outs/filtered_feature_bc_matrix.h5 MF30_LN3_POST/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/11_MC90_091323_L/outs/filtered_feature_bc_matrix.h5 MC90_LN3_POST/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/12_MC98_091323_L/outs/filtered_feature_bc_matrix.h5 MC98_LN3_POST/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/13_MC98_021423_L/outs/filtered_feature_bc_matrix.h5 MC98_LN3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/14_MB59_011023_PB/outs/filtered_feature_bc_matrix.h5 MB59_PBMC3b_PRE/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/15_MB59_091323_PB/outs/filtered_feature_bc_matrix.h5 MB59_PBMC3_POST/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch4_5/Analysis_225CWWLT1_22HTYHLT3/16_MC90_091323_PB/outs/filtered_feature_bc_matrix.h5 MC90_PBMC3_POST/outs/filtered_feature_bc_matrix.h5
+
+
+## batch1 symlinks
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/1_F89_MB59_1_10_23/outs/filtered_feature_bc_matrix.h5 MB59_PBMC_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/2_F89_MC90_1_10_23/outs/filtered_feature_bc_matrix.h5 MC90_PBMC_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/3_F89_MC98_1_10_23/outs/filtered_feature_bc_matrix.h5 MC98_PBMC_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/4_F89_MB59_9_13_23/outs/filtered_feature_bc_matrix.h5 MB59_PBMC_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/5_F89_MC90_9_13_23/outs/filtered_feature_bc_matrix.h5 MC90_PBMC_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/6_F89_MC98_9_13_23/outs/filtered_feature_bc_matrix.h5 MC98_PBMC_POST/outs/filtered_feature_bc_matrix.h5
+
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/7_F89_MB59_2_1_3_23/outs/filtered_feature_bc_matrix.h5 MB59_LN_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/8_F89_MC90_2_1_3_23/outs/filtered_feature_bc_matrix.h5 MC90_LN_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/9_F89_MC98_2_1_3_23/outs/filtered_feature_bc_matrix.h5 MC98_LN_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/10_F89_MB59_2_9_13_23/outs/filtered_feature_bc_matrix.h5 MB59_LN_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/11_F89_MC90_2_9_13_23/outs/filtered_feature_bc_matrix.h5 MC90_LN_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch1_CR8/12_F89_MC98_2_9_13_23/outs/filtered_feature_bc_matrix.h5 MC98_LN_POST/outs/filtered_feature_bc_matrix.h5
+
+
+## BATCH2: symlink .h5 from rawdata into these pipeline folders
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/1_MF07_11_24_21/outs/filtered_feature_bc_matrix.h5 MF07_PBMC2_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/2_MF30_11_24_21/outs/filtered_feature_bc_matrix.h5 MF30_PBMC2_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/3_MC73_11_24_21/outs/filtered_feature_bc_matrix.h5 MC73_PBMC2_PRE/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/4_MF07_09_13_23/outs/filtered_feature_bc_matrix.h5 MF07_PBMC2_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/5_MF30_09_13_23/outs/filtered_feature_bc_matrix.h5 MF30_PBMC2_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/batch2_CR8/6_MC73_09_13_23/outs/filtered_feature_bc_matrix.h5 MC73_PBMC2_POST/outs/filtered_feature_bc_matrix.h5
+
+#### also batch3
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/1_MC73_09132023/outs/filtered_feature_bc_matrix.h5 MC73_PBMC3_POST/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/2_MC73_09192023/outs/filtered_feature_bc_matrix.h5 MC73_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/3_MF30_09192023/outs/filtered_feature_bc_matrix.h5 MF30_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+ln -s /data/NCI_VB/rawdata/CCRVB-47/PBMC3/Analysis_223MGJLT1/4_MF07_09192023/outs/filtered_feature_bc_matrix.h5 MF07_PBMC3_DAY8/outs/filtered_feature_bc_matrix.h5
+
+
+#### check files are teal not red with ls MF07_PBMC3_DAY8/outs/ etc.
+
+
+
+
+######## 3. generate groups.tab edit to be below
+## return to pipeline dir
+cd ../
+nano groups.tab
+## format is below
+#<sampleID> \t <expGroup> \t <sampleAlias> \t <dataType:gex/citeseq/atac/vdj>
+## use tab key and return key to separate columns and rows, respectively
+##### second column should contain the combined group with 4 levels
+MB59_LN3_PRE LN3_PRE    MB59_LN3_PRE    gex
+MB59_LN3_DAY8 LN3_DAY8    MB59_LN3_DAY8     gex
+MC90_LN3_PRE LN3_PRE    MC90_LN3_PRE    gex
+MC90_LN3_DAY8 LN3_DAY8    MC90_LN3_DAY8     gex
+MB59_PBMC3_PRE PBMC3_PRE    MB59_PBMC3_PRE    gex
+MB59_PBMC3_DAY8 PBMC3_DAY8    MB59_PBMC3_DAY8     gex
+MC90_PBMC3_PRE PBMC3_PRE    MC90_PBMC3_PRE    gex
+MC90_PBMC3_DAY8 PBMC3_DAY8    MC90_PBMC3_DAY8     gex
+MF30_LN3_PRE    LN3_PRE   MF30_LN3_PRE    gex
+MF30_LN3_POST   LN3_POST    MF30_LN3_POST   gex
+MC90_LN3_POST   LN3_POST    MC90_LN3_POST   gex
+MC98_LN3_POST   LN3_POST    MC98_LN3_POST   gex
+MC98_LN3_DAY8   LN3_DAY8    MC98_LN3_DAY8   gex
+MB59_PBMC3b_PRE PBMC3b_PRE    MB59_PBMC3b_PRE    gex
+MB59_PBMC3_POST PBMC3_POST    MB59_PBMC3_POST    gex
+MC90_PBMC3_POST PBMC3_POST    MC90_PBMC3_POST    gex
+MF07_PBMC2_PRE    PBMC2_PRE   MF07_PBMC2_PRE    gex
+MF30_PBMC2_PRE    PBMC2_PRE   MF30_PBMC2_PRE    gex
+MC73_PBMC2_PRE    PBMC2_PRE   MC73_PBMC2_PRE    gex
+MF07_PBMC2_POST PBMC2_POST    MF07_PBMC2_POST gex
+MF30_PBMC2_POST PBMC2_POST    MF30_PBMC2_POST gex
+MC73_PBMC2_POST PBMC2_POST    MC73_PBMC2_POST gex
+MB59_PBMC_PRE PBMC_PRE    MB59_PBMC_PRE gex
+MC90_PBMC_PRE PBMC_PRE    MC90_PBMC_PRE gex
+MC98_PBMC_PRE PBMC_PRE    MC98_PBMC_PRE gex
+MB59_PBMC_POST PBMC_POST    MB59_PBMC_POST gex
+MC90_PBMC_POST PBMC_POST    MC90_PBMC_POST gex
+MC98_PBMC_POST PBMC_POST    MC98_PBMC_POST gex
+MB59_LN_PRE LN_PRE    MB59_LN_PRE gex
+MC90_LN_PRE LN_PRE    MC90_LN_PRE gex
+MC98_LN_PRE LN_PRE    MC98_LN_PRE gex
+MB59_LN_POST LN_POST    MB59_LN_POST gex
+MC90_LN_POST LN_POST    MC90_LN_POST gex
+MC98_LN_POST LN_POST    MC98_LN_POST gex
+
+## to save, ctrl X, Y enter
+
+## the above was used for the initial QC of each sample then moved to groupsQC.tab
+cp groups.tab groupsQC.tab
+## then for integration, made groups.tab have all the samples (batch1, batch2 and batch3)
+nano groups.tab
+MB59_PBMC_PRE PBMC_PRE    MB59_PBMC_PRE gex
+MC90_PBMC_PRE PBMC_PRE    MC90_PBMC_PRE gex
+MC98_PBMC_PRE PBMC_PRE    MC98_PBMC_PRE gex
+MF07_PBMC2_PRE    PBMC2_PRE   MF07_PBMC2_PRE    gex
+MF30_PBMC2_PRE    PBMC2_PRE   MF30_PBMC2_PRE    gex
+MC73_PBMC2_PRE    PBMC2_PRE   MC73_PBMC2_PRE    gex
+MC90_PBMC3_PRE    PBMC3_PRE   MC90_PBMC3_PRE    gex
+MB59_PBMC3_PRE    PBMC3_PRE   MB59_PBMC3_PRE    gex
+MB59_PBMC3b_PRE    PBMC3b_PRE   MB59_PBMC3b_PRE    gex
+MB59_LN_PRE LN_PRE    MB59_LN_PRE gex
+MC90_LN_PRE LN_PRE    MC90_LN_PRE gex
+MC98_LN_PRE LN_PRE    MC98_LN_PRE gex
+MB59_LN3_PRE LN3_PRE    MB59_LN3_PRE    gex
+MC90_LN3_PRE LN3_PRE    MC90_LN3_PRE    gex
+MF30_LN3_PRE    LN3_PRE   MF30_LN3_PRE    gex
+
+MB59_PBMC_POST PBMC_POST    MB59_PBMC_POST gex
+MC90_PBMC_POST PBMC_POST    MC90_PBMC_POST gex
+MC98_PBMC_POST PBMC_POST    MC98_PBMC_POST gex
+MF07_PBMC2_POST PBMC2_POST    MF07_PBMC2_POST gex
+MF30_PBMC2_POST PBMC2_POST    MF30_PBMC2_POST gex
+MC73_PBMC2_POST PBMC2_POST    MC73_PBMC2_POST gex
+MC73_PBMC3_POST PBMC3_POST    MC73_PBMC3_POST gex
+MB59_PBMC3_POST PBMC3_POST    MB59_PBMC3_POST    gex
+MC90_PBMC3_POST PBMC3_POST    MC90_PBMC3_POST    gex
+MB59_LN_POST LN_POST    MB59_LN_POST gex
+MC90_LN_POST LN_POST    MC90_LN_POST gex
+MC98_LN_POST LN_POST    MC98_LN_POST gex
+MF30_LN3_POST   LN3_POST    MF30_LN3_POST   gex
+MC90_LN3_POST   LN3_POST    MC90_LN3_POST   gex
+MC98_LN3_POST   LN3_POST    MC98_LN3_POST   gex
+
+MC73_PBMC3_DAY8 PBMC3_DAY8    MC73_PBMC3_DAY8 gex
+MF30_PBMC3_DAY8 PBMC3_DAY8    MF30_PBMC3_DAY8 gex
+MF07_PBMC3_DAY8 PBMC3_DAY8    MF07_PBMC3_DAY8 gex
+MB59_PBMC3_DAY8 PBMC3_DAY8    MB59_PBMC3_DAY8     gex
+MC90_PBMC3_DAY8 PBMC3_DAY8    MC90_PBMC3_DAY8     gex
+MB59_LN3_DAY8 LN3_DAY8    MB59_LN3_DAY8     gex
+MC90_LN3_DAY8 LN3_DAY8    MC90_LN3_DAY8     gex
+MC98_LN3_DAY8   LN3_DAY8    MC98_LN3_DAY8   gex
+
+######## 4. generate contrasts.tab ---> do not need to generate this since not specifying contrasts
+#nano contrasts.tab
+#IL15    Control ## be sure to specify the order that you're expecting
+## additional lines for additional comparisons
+
+######## 5. generate additonal directories for outputs
+mkdir filtered
+mkdir QC
+mkdir QC/images
+mkdir integration
+mkdir integration/images
+### separate dirs for each set of samples
+mkdir integration/images_batch123_38samps
+
+
+
+
+
+
+
+
+######## 6. clone scripts from github into working dir & copy several from hierarchy "loose" into working directory
+git clone https://github.com/wong-nw/scRNASeq_2023.git # makes scRNAseq_2023 dir
+cp -r scRNASeq_2023/workflow/ ./workflow/ #needs -r to copy the dir
+cp scRNASeq_2023/bashScripts/qcRun.swarm ./qcRun.swarm
+cp scRNASeq_2023/bashScripts/setupQC.bash ./setupQC.bash
+cp scRNASeq_2023/bashScripts/run* ./
+
+
+
+
+######## 7. edit scripts for current study design
+#### the following a and b were not used in the singleCell_pipeline_240301 run
+## 7a. qcRun.swarm - may be better to start this one from scratch if has very few lines
+rm qcRun.swarm #remove old version
+nano qcRun.swarm 
+## one line per sample
+bash setupQC.bash MB59_LN3_PRE
+bash setupQC.bash MB59_LN3_DAY8
+bash setupQC.bash MC90_LN3_PRE
+bash setupQC.bash MC90_LN3_DAY8
+bash setupQC.bash MB59_PBMC3_PRE
+bash setupQC.bash MB59_PBMC3_DAY8
+bash setupQC.bash MC90_PBMC3_PRE
+bash setupQC.bash MC90_PBMC3_DAY8
+bash setupQC.bash MF30_LN3_PRE
+bash setupQC.bash MF30_LN3_POST
+bash setupQC.bash MC90_LN3_POST
+bash setupQC.bash MC98_LN3_POST
+bash setupQC.bash MC98_LN3_DAY8
+bash setupQC.bash MB59_PBMC3b_PRE
+bash setupQC.bash MB59_PBMC3_POST
+bash setupQC.bash MC90_PBMC3_POST
+bash setupQC.bash MB59_PBMC_PRE
+bash setupQC.bash MC90_PBMC_PRE
+bash setupQC.bash MC98_PBMC_PRE
+bash setupQC.bash MB59_PBMC_POST
+bash setupQC.bash MC90_PBMC_POST
+bash setupQC.bash MC98_PBMC_POST
+bash setupQC.bash MB59_LN_PRE
+bash setupQC.bash MC90_LN_PRE
+bash setupQC.bash MC98_LN_PRE
+bash setupQC.bash MB59_LN_POST
+bash setupQC.bash MC90_LN_POST
+bash setupQC.bash MC98_LN_POST
+bash setupQC.bash MF07_PBMC2_PRE
+bash setupQC.bash MF30_PBMC2_PRE
+bash setupQC.bash MC73_PBMC2_PRE
+bash setupQC.bash MF07_PBMC2_POST
+bash setupQC.bash MF30_PBMC2_POST
+bash setupQC.bash MC73_PBMC2_POST
+bash setupQC.bash MC73_PBMC3_POST 
+bash setupQC.bash MC73_PBMC3_DAY8 
+bash setupQC.bash MF30_PBMC3_DAY8 
+bash setupQC.bash MF07_PBMC3_DAY8 
+
+
+
+## 7b. setupQC.bash
+nano setupQC.bash
+# be sure R 4.2 (done, no change)
+# set R script to be scrna_QC.R (done, no change)
+# set reference genome (hg38 HPCA)
+# *** don't comment out init scRNA4, or activate scRNA4 & add
+export TMPDIR=/lscratch/$SLURM_JOB_ID
+
+module purge
+module load R/4.2
+
+if [[ ! -d /data/NCI_VB/$USER/R_libs/4.2 ]]; then
+                  mkdir /data/NCI_VB/$USER/R_libs/4.2
+fi
+export R_LIBS_USER="/data/NCI_VB/$USER/R_libs/4.2"
+
+#Rscript workflow/scripts/scrna_QC.R cellRangerOut/ QC/ $1 0.2,0.4,0.6,0.8,1.0,1.2,1.4 hg38 HPCA
+
+
+##################### the rest are for batch correction, which I will do in a few iterations
+#batch123_38samps
+#batch23_26samps
+#techrepsPRE_8samps
+#techrepsPBMC_8samps
+#techreps45_2samps
+
+
+## 7c. runCCA.bash
+nano runCCA.bash
+## *** DON'T comment out scRNA4 & add
+## change species to hg38
+######### for batch123_38samps
+cp runCCA.bash runCCA_batch123_38samps.bash
+nano runCCA_batch123_38samps.bash
+## set <contrast> to be "batch123_38samps" (needs to be without hyphen) 
+## *** change "filtered" to filtered/batch123_38samps
+
+
+
+
+
+## 7d. runHarmony.bash 
+nano runHarmony.bash
+## *** DON'T comment out scRNA4 & add
+## change species to hg38
+######### for batch123_38samps
+cp runHarmony.bash runHarmony_batch123_38samps.bash
+nano runHarmony_batch123_38samps.bash
+## set <contrast> to be "batch123_38samps" (needs to be without hyphen) 
+## *** change "filtered" to filtered/batch123_38samps
+
+
+
+
+
+## 7e. runRPCA.bash
+nano runRPCA.bash
+## *** DON'T comment out scRNA4 & add
+## change species to hg38
+######### for batch123_38samps
+cp runRPCA.bash runRPCA_batch123_38samps.bash
+nano runRPCA_batch123_38samps.bash
+## set <contrast> to be "batch123_38samps" (needs to be without hyphen) 
+## *** change "filtered" to filtered/batch123_38samps
+
+
+
+## 7f. runIntegrationReport.bash
+##### make one for each integration runs
+
+
+##### for batch123_38samps
+cp runIntegrationReport.bash runIntegrationReport_batch123_38samps.bash
+cat runIntegrationReport_batch123_38samps.bash # to see what is there
+sed -i "s/peak-infusion/batch123_38samps/g" runIntegrationReport_batch123_38samps.bash #to edit
+cat runIntegrationReport_batch123_38samps.bash ## to view/confirm changes
+### should have the following
+#also change R to 4.2 (which will pull 4.2.2)
+## *** comment out scRNA4 & add above
+## *** also change $PWD/integration/images to $PWD/integration/images_batch123_38samps
+
+
+
+## 7g. workflow/scripts/integrationReport.R
+nano workflow/scripts/integrationReport.R
+# change the following
+rmarkdown::render("/data/CCBR/projects/ccbr1227/workflow/scripts/integrationReports.Rmd"
+# to
+rmarkdown::render("/data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/workflow/scripts/integrationReports.Rmd"
+
+
+## 7h. workflow/scripts/integrationReports.Rmd
+# move stringr lib to top of bioconductor 
+#also comment out library(magick)
+#also if macaque: cell annotation batch correction chunk (line 161) needed to be set to eval=FALSE
+#can also add {.tabset} to end of line 135 "### Batch correction selection {.tabset}"
+### also add raster=F, pt.size= 0.001 to all dimplot so will render with >100k cells
+#add {.tabset}: #### Samples before and after batch correction {.tabset}
+# add ##### By Sample and ##### By Group before sampleBatchCorrection and groupBatchCorrection chunks
+# add ## {.tabset} after ## `r fileTitle`
+# add tabsets to:
+#### Clustering without batch correction {.tabset}
+#### Clustering after batch correction with CCA Integration {.tabset}
+# etc. for 5 methods
+# for the 5 clustering chunks:
+# change fig.width=18
+# add raster=F, pt.size= 0.001 for dimplots
+
+nano workflow/scripts/integrationReports.Rmd
+# ctrl K ctrl U to move a line in in nano
+
+
+## 7i. fix integration scripts
+# add the following 2 lines to top of libs:
+.libPaths("/data/CCBR_Pipeliner/db/PipeDB/scrna4.2Rlibs")
+library(celldex,lib.loc=loc) 
+nano workflow/scripts/harmony.R
+nano workflow/scripts/rpca.R
+nano workflow/scripts/integrateBatches.R
+### for rpca and integrateBatches : also need to add at line 67
+########## trim groupFile to be only the samples in this batch of integration
+groupFile_trim <- groupFile[which(groupFile$V1 %in% splitFiles),]
+print(groupFile_trim)
+#### and replace all subsequen groupFile, with groupFile_trim (7 instances around lines 77,78,79, 91x2, 123/129x2)
+### these will be copied from general in the future
+###### **also increase globals maxSize to 200 G
+options(future.globals.maxSize = 200000 * 1024^2)
+
+
+
+## 7j. make 3 runIntegration.swarm files
+######## for batch23_26samps
+nano runIntegration.swarm
+######## for batch123_38samps
+cp runIntegration.swarm runIntegration_batch123_38samps.swarm
+## add _batch123_38samps to each before .bash
+cat runIntegration_batch123_38samps.swarm
+
+
+
+
+## 7k. workflow/scripts/scRNA_QC.Rmd
+nano workflow/scripts/scRNA_QC.Rmd
+#also comment out library(magick)
+### also add prefilter saving to debug the miQC issue: ctrl W "save", add saveRDS(so_prefilter,paste0(gsub(".rds","",outFile),"_prefilter.rds"))
+#### also add contingency for miQC model only yielding single cluster
+## ctrl W "PlotMiQC"
+# remove these lines
+miQC_probabilityPlot = PlotMiQC(so_prefilter,color.by="miQC.probability") + ggplot2::scale_color_gradient(low = "grey", high = "purple") + ggtitle("MiQC probability of low quality")
+miQC_retentionPlot = PlotMiQC(so_prefilter,color.by="miQC.keep") + ggtitle("MiQC classification of retained cells")
+# add these
+### if flexmix model returns only 1 cluster, all miQC.probability will be 0
+if(length(unique(so_prefilter$miQC.probability)) == 1){
+  miQC_probabilityPlot = ggplot(FetchData(so_prefilter, c("percent.mt","nFeature_RNA","miQC.probability")), 
+    aes(x = nFeature_RNA, y = percent.mt, color =miQC.probability ))+
+    geom_point()+
+    ggplot2::labs(x = "Unique genes found", y = "Percent reads mitochondrial") + 
+    ggplot2::ylim(c(0, NA))+
+    ggplot2::scale_color_gradient(low = "grey", high = "purple") + ggtitle("MiQC probability of low quality (model returned only 1 cluster)")+
+    cowplot::theme_cowplot()
+  miQC_retentionPlot = ggplot(FetchData(so_prefilter, c("percent.mt","nFeature_RNA","miQC.keep")), aes(x = nFeature_RNA, y =         percent.mt, color =miQC.keep ))+
+    geom_point()+
+    ggplot2::labs(x = "Unique genes found", y = "Percent reads mitochondrial") + 
+    ggplot2::ylim(c(0, NA))+
+    cowplot::theme_cowplot()+
+    ggtitle("MiQC classification of retained cells")
+}else{
+  miQC_probabilityPlot = PlotMiQC(so_prefilter,color.by="miQC.probability") + ggplot2::scale_color_gradient(low = "grey", high = "purple") + ggtitle("MiQC probability of low quality")
+  miQC_retentionPlot = PlotMiQC(so_prefilter,color.by="miQC.keep") + ggtitle("MiQC classification of retained cells")
+}
+
+
+
+
+
+##
+
+
+
+######## 8. run QC (swarm job submission for scRNA_QC.Rmd) 
+## should be in pipeline directory
+cd /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG
+swarm -g 96 -t 16 --time 12:00:00 --partition ccr,norm -f qcRun.swarm
+#47361266 @2:26pm EST 2/10/25 (not including batch3 and save prefilter for all)
+newwall --jobid 47361266 --time 02-00:00:00
+### several completed in 2 hrs:0,1,2,3,8,10,11,12,14,15,16,17,18,19,21,23,24,28,29,30,33
+### (still running at 1.5 hrs: 1,8,11,13,22,23,24,25,26) --> all complete or failed by 2hr20 min
+### several failed: 
+# failing on miQC plot - 13(MB59_PBMC3b_PRE), 20 (MC90_PBMC_POST), 22 (MB59_LN_PRE), 25 (MB59_LN_POST), 26 (MC90_LN_POST), 27 (MC98_LN_POST),31 (MF07_PBMC2_POST),32 (MF30_PBMC2_POST)
+# too much memory (>96G) - 4 (MB59_PBMC3_PRE),5 (MB59_PBMC3_DAY8)
+# job never started (too short error - file not found) - 6 (MC90_PBMC3_PRE),7 (MC90_PBMC3_DAY8),9 (MF30_LN3_PRE)
+########## rerun the ones that faile
+nano qcRun_rerun.swarm 
+## one line per sample
+#bash setupQC.bash MB59_PBMC3_PRE
+#bash setupQC.bash MB59_PBMC3_DAY8
+bash setupQC.bash MC90_PBMC3_PRE
+#bash setupQC.bash MC90_PBMC3_DAY8
+#bash setupQC.bash MF30_LN3_POST ### should have been pre, ran separately as qcRun_rerun2.swarm
+bash setupQC.bash MB59_PBMC3b_PRE
+bash setupQC.bash MC90_PBMC_POST
+bash setupQC.bash MB59_LN_PRE
+bash setupQC.bash MB59_LN_POST
+bash setupQC.bash MC90_LN_POST
+bash setupQC.bash MC98_LN_POST
+bash setupQC.bash MF07_PBMC2_POST
+bash setupQC.bash MF30_PBMC2_POST
+
+
+
+swarm -g 200 -t 16 --time 12:00:00 --partition ccr,norm -f qcRun_rerun.swarm
+#47390309 @6:06pm EST 2/10/25; 47472243 @1:14pm EST 2/11/25; 47509382 @6:01pm 2/11/25 EST ---> all successfully completed
+newwall --jobid 47509382 --time 02-00:00:00
+#----> only MB59_PBMC3_PRE, MB59_PBMC3_DAY8, MC90_PBMC3_DAY8 completed successfully, but the prefilter rds were generated
+swarm -g 200 -t 16 --time 12:00:00 --partition ccr,norm -f qcRun_rerun2.swarm
+
+#### including batch3 and prefilter saving for all
+swarm -g 200 -t 16 --time 12:00:00 --partition ccr,norm -f qcRun.swarm
+#48847050 @12:32am 2/23/25
+newwall --jobid 48847050 --time 02-00:00:00
+### when finished move all to prefilter (12 had been there from the reruns)
+mv filtered/*_prefilter.rds filtered/prefilter
+
+
+## can tell when successfully completed because the following shows an .rds for each sample
+#ls /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/filtered
+
+ls filtered ### should have 34 rds
+
+###move the _prefilter to new folder
+mkdir filtered/prefilter
+mv filtered/*_prefilter.rds filtered/prefilter
+
+## once done, may need to copy these rds off biowulf for additional analysis VERY SLOW TO OPEN IN CONSOLE FROM BIOWULF
+## can view reports in QC folder
+#ls QC
+
+
+
+######## since want to integrate various combinations separately, move to separate subdirs
+mkdir filtered/batch123_38samps
+
+### make symlinks to collect the combinations of choice, symlinks need full path
+
+
+
+############### batch123_38samps
+####  all of filtered
+ln -s /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/filtered/M* /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/filtered/batch123_38samps/
+
+### also all batch3
+ln -s /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_241112_hg38/filtered/*_PBMC3_* /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/filtered/batch123_38samps
+
+
+
+### check all teal
+ls -lah filtered/batch123_38samps ### should have 38 rds
+
+
+
+
+
+
+
+
+
+####### *** also reset groups.tab to include all samples ****
+
+
+
+
+######## 9. run integration (swarm job submission for integrateBatches.R - CCA, harmony & RPCA)
+## once QC complete, be sure uncomment scRNA4 in each .bash for integration
+#### separate swarm for each combo of samples
+
+####### all 38 samples
+swarm -g 800 -t 16 --partition largemem -f runIntegration_batch123_38samps.swarm
+#48474610 @12:20am EST 2/20/25, (had had rpca typo) took ~7hrs, 10.5hrs & 7 hrs, max 600G
+newwall --jobid 48474610 --time 04-00:00:00
+
+
+
+## confirm successful completion by 5x for each combo
+ls -lah integration
+
+######## 10. run integrationreport (sbatch job submission for integrationReports.Rmd)
+#### separate swarm for each combo of samples
+
+
+sbatch --mem=800g --cpus-per-task=16 --partition=largemem runIntegrationReport_batch123_38samps.bash
+#48723814 @1:08pm 2/21/25
+newwall --jobid 48723814 --time 02-00:00:00
+
+
+
+
+#### cell annotation batch correction chunk (line 161) needed to be set to eval=FALSE
+## can view reports in integration folder
+ls integration
+
+######## copy scripts to code dir to push to github
+
+###### copy rpca.R and integrateBatches.R into my general
+
+# make new dir with ccrvb# and pipeline date
+mkdir /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/*.tab /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG/
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/*.bash /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG/
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/*.swarm /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG/
+cp -r /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/workflow/ /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG/
+# push to github ( did 2/25/25)
+cd /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/
+git status
+git add Felber/pipeline_runs/ccrvb47_singleCell_pipeline_20250210_hg38_KCG/
+git commit -m "initial post"
+git push
+
+
+#### also copy the Rmd to my general 
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/workflow/scripts/integrationReports.Rmd /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/general/scRNAseq_pipeline_scripts/ccrvb47_500kCells_integrationReports.Rmd
+
+cp /data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/workflow/scripts/scRNA_QC.Rmd /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/general/scRNAseq_pipeline_scripts/ccrvb47_miQC_prefilter_scRNA_QC.Rmd
+
+
+######## moved rds to my computer for easy loading (took 30+ min)
+
+### from
+#/data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/singleCell_pipeline_20250210_hg38_KCG/integration/
+### to
+#/Documents/BarbaraFelber/ccrvb47_LIONscRNAseq_KCG/RData/
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## QC Each sample separately {.tabset}
+
+```{r QC_separately, results='asis', fig.width=20, fig.height=7}
+###### for each file in the input dir, can't read symlinks
+## these are all the files from all 5 batches
+files_to_use_prep <- list.files(path=file.path(input_dir))
+files_to_use <- files_to_use_prep[grepl("_prefilter.rds",files_to_use_prep)]
+
+#### generate dataframe withuseful metdata to get the order I want
+files_to_use_df <- data.frame(file_name = c(files_to_use)) %>%
+  dplyr::mutate(Animal = str_before_first(file_name,"_"),
+                TissueBatch = str_before_last(str_after_first(file_name,"_"),"_"),
+                Tissue = factor(ifelse(grepl("LN",TissueBatch),"LN","PBMC"),c("LN","PBMC")),
+                Time = factor(
+                  str_remove_all(str_replace_all(str_after_nth(file_name,"_",2),"POST","DAY2"),"_prefilter.rds"),
+                c("PRE","DAY2","DAY8")),
+                Method = factor(ifelse(grepl(paste(c("LN_","PBMC_"), collapse = '|'), file_name),
+                                "method1",
+                                ifelse(grepl(paste(c("LN3_","PBMC3_"), collapse = '|'), file_name),
+                                       "method3","method2")),c("method1","method2","method3"))
+  ) %>%
+  dplyr::arrange(Tissue,Time,Animal,Method)
+  
+
+
+######### prep data.frame to catch stats
+stats_df <- data.frame(matrix(ncol = 8, nrow = 0))
+colnames(stats_df) <- c("sample","Num_Retained","maxPctMT_Retained","meanPctMT_Retained","medianPctMT_Retained","MiQC_clusters","Num_MiQCdiscard","Num_Doublets")
+
+for(curr_file in files_to_use_df$file_name){
+  
+    cat("### ",paste0(str_replace_all(str_before_last(curr_file,"_"),"POST","DAY2"), " {.tabset}"),"\n")
+cat("\n")
+
+  ### read prefilter file
+  so_prefilter <- readRDS(file = file.path(input_dir,curr_file))
+  
+  
+  
+######## save stats to table
+curr_stats <- as.data.frame(table(so_prefilter$filtered)) %>%
+  ### transpose
+  column_to_rownames("Var1") %>%
+  t() %>%
+  data.frame() %>%
+  ## rename columns
+  dplyr::rename(Num_Doublets = Filtered..Doublets, Num_MiQCdiscard = Filtered..MiQC, Num_Retained=Retained) %>%
+  ## useful columns
+  dplyr::mutate(sample = paste0(str_replace_all(str_before_last(curr_file,"_"),"POST","DAY2")),
+                MiQC_clusters = ifelse(length(unique(so_prefilter$miQC.probability)) == 1,
+                                       1,2),
+                maxPctMT_Retained = max(subset(so_prefilter, subset = filtered == "Retained")$percent.mt),
+                meanPctMT_Retained = mean(subset(so_prefilter, subset = filtered == "Retained")$percent.mt),
+                medianPctMT_Retained = median(subset(so_prefilter, subset = filtered == "Retained")$percent.mt)) %>%
+  ### remove rownames
+  rownames_to_column() %>%
+  ## reorder as well
+  dplyr::select(sample,Num_Retained,maxPctMT_Retained,meanPctMT_Retained,medianPctMT_Retained,MiQC_clusters,Num_MiQCdiscard,Num_Doublets)
+  
+stats_df <- rbind(stats_df, curr_stats)
+
+
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+#### plot kept pie
+
+      cat("#### ",paste0(" Filtered Pie"),"\n")
+      cat('\n')
+
+ 
+pie_df <- curr_stats[,startsWith(colnames(curr_stats),"Num_")] %>%
+    ## make longer
+    rownames_to_column() %>%
+    tidyr::pivot_longer(!rowname, names_to = "Filtering", values_to = "NumCells") %>%
+    ## simplify names
+    dplyr::mutate(Filtering = str_remove_all(Filtering,"Num_"))
+
+pie(pie_df$NumCells,
+      labels = paste0(pie_df$Filtering, "(n=",pie_df$NumCells,")"),
+     col = c("dodgerblue","goldenrod3","magenta")
+      
+      )
+ 
+  cat("\n")
+cat(' \n \n') ### this is the key!
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+
+######## UMAPs
+
+      cat("#### ",paste0(" UMAPs"),"\n")
+      cat('\n')
+      
+      list_of_plots <- list()
+
+  list_of_plots[["filterConditionPlot"]] <- DimPlot(so_prefilter,group.by="filtered",cols = c("magenta","goldenrod3","dodgerblue")) + 
+    ggtitle(paste("Sample before filtering"))
+  
+  list_of_plots[["filterConditionSplitPlot"]] <- DimPlot(so_prefilter,group.by="filtered",split.by="filtered",cols = c("magenta","goldenrod3","dodgerblue")) + 
+    ggtitle("Filtered cells in isolation")
+  
+  do.call("grid.arrange",c(list_of_plots, ncol=2))
+
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+######### stats scatter plots
+
+    cat("#### ",paste0(" Compare Stats"),"\n")
+      cat('\n')
+
+        list_of_plots <- list()
+        
+  list_of_plots[["miQC_feature_mitoPlot"]]<- FeatureScatter(so_prefilter,feature1="nFeature_RNA",feature2="percent.mt",group.by="Sample") +
+    ggtitle("","Number of genes vs mitochondrial percentage") +
+    NoLegend()
+    
+  list_of_plots[["miQC_count_mitoPlot"]] <- FeatureScatter(so_prefilter,feature1="nCount_RNA",feature2="percent.mt",group.by="Sample") +
+      ggtitle("","Number of reads vs mitochondrial percentage") + 
+      NoLegend()
+  
+list_of_plots[["miQC_feature_countPlot"]] <- FeatureScatter(so_prefilter,feature1="nFeature_RNA",feature2="nCount_RNA",group.by="Sample") +
+  ggtitle("","Number of genes vs number of counts") + 
+  NoLegend()
+
+  
+do.call("grid.arrange",c(list_of_plots, ncol=3))
+
+  
+    cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+######### MiQC plots
+#     cat("#### ",paste0(" MiQC plots"),"\n")
+#       cat('\n')
+# 
+# list_of_plots <- list()
+# if(length(unique(so_prefilter$miQC.probability)) == 1){
+#   list_of_plots[["miQC_probabilityPlot"]] <- ggplot(FetchData(so_prefilter, c("percent.mt","nFeature_RNA","miQC.probability")), 
+#     aes(x = nFeature_RNA, y = percent.mt, color =miQC.probability ))+
+#     geom_point()+
+#     ggplot2::labs(x = "Unique genes found", y = "Percent reads mitochondrial") + 
+#     ggplot2::ylim(c(0, NA))+
+#     ggplot2::scale_color_gradient(low = "grey", high = "purple") + ggtitle("MiQC probability of low quality (model returned only 1 cluster)")+
+#     cowplot::theme_cowplot()
+#    list_of_plots[["miQC_retentionPlot"]] <- ggplot(FetchData(so_prefilter, c("percent.mt","nFeature_RNA","miQC.keep")), aes(x = nFeature_RNA, y =         percent.mt, color =miQC.keep ))+
+#     geom_point()+
+#     ggplot2::labs(x = "Unique genes found", y = "Percent reads mitochondrial") + 
+#     ggplot2::ylim(c(0, NA))+
+#     cowplot::theme_cowplot()+
+#     ggtitle("MiQC classification of retained cells")
+# }else{
+#   list_of_plots[["miQC_probabilityPlot"]] <- PlotMiQC(so_prefilter,color.by="miQC.probability") + ggplot2::scale_color_gradient(low = "grey", high = "purple") + ggtitle("MiQC probability of low quality")
+#   list_of_plots[["miQC_retentionPlot"]] <- PlotMiQC(so_prefilter,color.by="miQC.keep") + ggtitle("MiQC classification of retained cells")
+# }
+#   
+# 
+# do.call("grid.arrange",c(list_of_plots, ncol=2))
+
+  
+    cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+}
+
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+```
+
+## QC Summary {.tabset}
+
+```{r QC_summary, results='asis', fig.width=18, fig.height=8}
+
+####### stacked barplot
+
+    cat("### ",paste0( "Filtered proportions "),"\n")
+cat("\n")
+
+p <- stats_df %>%
+  dplyr::select(all_of(c("sample",colnames(.)[startsWith(colnames(.),"Num_")]))) %>%
+    ## make longer
+    tidyr::pivot_longer(!sample, names_to = "Filtering", values_to = "NumCells") %>%
+    ## simplify names
+    dplyr::mutate(Filtering = str_remove_all(Filtering,"Num_"),
+                  sample = factor(sample, unique(sample))) %>%
+  ggplot(aes(y=NumCells, x=sample, fill=Filtering, label = NumCells
+             ))+
+    scale_fill_manual(values = c(Doublets="magenta",MiQCdiscard="goldenrod3",Retained ="dodgerblue"))+  
+    geom_bar(stat="identity",position = "fill")+
+  ylab("Pct")+
+  geom_text_repel(aes(label = NumCells),
+    #label = ifelse(batch == "PBMC2", NumCells,"")),
+           position = position_fill(vjust = 0.5), 
+    #nudge_x = 0.5, 
+    vjust = 1, hjust = 0.5, 
+    size =3, min.segment.length = 1, 
+    direction = "x"
+            )+
+  
+  
+    theme_bw()+
+  #### rotate x axis labels
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plot(p)
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+########## max, mean, median % mt
+
+
+for(curr_test in c("Max","Mean","Median")){
+      cat("### ",paste0( curr_test," % MT reads in Retained cells "),"\n")
+cat("\n")
+
+curr_test_name <- paste0(tolower(curr_test),"PctMT_Retained")
+
+p <- stats_df %>%
+  ## add Time & tissue
+  dplyr::mutate(Time = str_after_last(sample,"_"),
+                Tissue = ifelse(grepl("LN",sample),"LN","PBMC"),
+                Tissue_Time = factor(paste0(Tissue,"_",Time),
+                                     c(
+                                         "LN_PRE","LN_DAY2","LN_DAY8",
+                                         "PBMC_PRE","PBMC_DAY2","PBMC_DAY8")),
+              sample = factor(sample, unique(sample)),
+              MiQC_clusters = factor(MiQC_clusters)) %>%
+  ggplot(aes(x=sample, y=!!rlang::sym(curr_test_name), fill = Tissue_Time, color = MiQC_clusters))+
+  scale_fill_manual(values = c(LN_PRE="steelblue1",
+                               LN_DAY2="sienna1",
+                               LN_DAY8="yellowgreen",
+                               PBMC_PRE="steelblue4",
+                               PBMC_DAY2="sienna3",
+                               PBMC_DAY8="olivedrab"))+
+  scale_color_manual(values = c("1"="gold","2"="black"))+
+  geom_bar(stat="identity", linewidth = 1.5)+   
+  theme_bw()+
+  #### rotate x axis labels
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank())
+
+plot(p)
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+}
+
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+    cat("### ",paste0( "stats table"),"\n")
+cat("\n")
+
+to_print <- stats_df %>%
+   DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+            
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+    
+    ##### also save as .rds for future use
+    saveRDS(stats_df, file = file.path(outputRData_dir,"ccrvb47_batch123_38samps_QC_stats_df.rds"))
+
+
+  cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+
+
+```
+
+
+
+
+## Compare batch correction methods {.tabset}
+
+```{r setMerge}
+suffix_to_use <- "merged"
+name_to_use <- "no batch correction"
+reduction_to_use <- "pca"
+default_assay_to_use <- "SCT"
+```
+
+```{r prepSO, eval = eval_save_so}
+my_colors = dittoColors()
+
+
+seuratObj_to_use <- readRDS(file.path(str_replace_all(input_dir,"filtered","integration"), paste0(str_after_nth(params$study_name,"_",2),"_",suffix_to_use,".rds")))
+
+############# remake UMAP to 2D
+npcs=50
+seuratObj_to_use <- RunUMAP(object = seuratObj_to_use, reduction = reduction_to_use,
+                                     dims = 1:npcs,n.components = 2,
+                         n.neighbors = 30, min.dist = 0.25)
+
+
+######## add useful metadata
+
+### add in leveled sample & time & animal & tissue & batch
+seuratObj_to_use$Animal <- factor(str_before_first(as.character(str_remove_all(seuratObj_to_use$Sample, "S_")),"_"),
+                                       c("MB59","MC90","MC98",
+                                         "MC73","MF07","MF30"))
+
+seuratObj_to_use$Time <- factor(str_replace_all(str_after_last(seuratObj_to_use$Sample,"_"),"POST","DAY2"),
+                                       c("PRE","DAY2","DAY8"))
+
+seuratObj_to_use$TissueBatch <- str_before_first(str_after_first(as.character(str_remove_all(seuratObj_to_use$Sample, "S_")),"_"),"_")
+                                      # c("LN3","PBMC2","PBMC3","PBMC3b")
+
+seuratObj_to_use$Tissue <- NA
+seuratObj_to_use$Tissue[which(grepl("LN",seuratObj_to_use$TissueBatch) == TRUE)] <- "LN"
+seuratObj_to_use$Tissue[which(grepl("PBMC",seuratObj_to_use$TissueBatch) == TRUE)] <- "PBMC"
+
+
+seuratObj_to_use$Tissue <- factor(seuratObj_to_use$Tissue, c("LN","PBMC"))
+
+
+
+
+
+seuratObj_to_use$Animal_time <- factor(paste0(as.character(seuratObj_to_use$Animal),"_",as.character(seuratObj_to_use$Time)),
+                                       c("MB59_PRE","MC90_PRE","MC98_PRE",
+                                         "MC73_PRE","MF07_PRE","MF30_PRE",
+                                         "MB59_DAY2","MC90_DAY2","MC98_DAY2",
+                                         "MC73_DAY2","MF07_DAY2","MF30_DAY2",
+                                         "MB59_DAY8","MC90_DAY8","MC98_DAY8",
+                                         "MC73_DAY8","MF07_DAY8","MF30_DAY8"
+                                         ))
+
+
+seuratObj_to_use$Tissue_time <- factor(paste0(as.character(seuratObj_to_use$Tissue),"_",as.character(seuratObj_to_use$Time)),
+                                       c(
+                                         "LN_PRE","LN_DAY2","LN_DAY8",
+                                         "PBMC_PRE","PBMC_DAY2","PBMC_DAY8"
+                                       ))
+
+#### ignores method
+
+seuratObj_to_use$Animal_tissue_time <- factor(paste0(as.character(seuratObj_to_use$Animal),"_",as.character(seuratObj_to_use$Tissue),"_",as.character(seuratObj_to_use$Time)),
+                                       c("MB59_LN_PRE","MC90_LN_PRE", ### combines method3+1 = 2 total samples for each
+                                         "MC98_LN_PRE", ## only method1
+                                         "MF30_LN_PRE", ## only method3
+                                         
+                                         "MB59_LN_DAY2", ## only method1
+                                         "MC90_LN_DAY2","MC98_LN_DAY2", ### combines method3+1 = 2 total samples for each
+                                         "MF30_LN_DAY2", ## only method3
+                                         
+                                         "MB59_LN_DAY8","MC90_LN_DAY8","MC98_LN_DAY8",#"MF30_LN_DAY8", ## only method3
+                                         
+                                         "MB59_PBMC_PRE",##2 replicate method3 samples combined + 1 method1 = 3 total samples
+                                         "MC90_PBMC_PRE", ### combines method3+1 = 2 total samples
+                                         "MC98_PBMC_PRE", ### only method1
+                                         "MC73_PBMC_PRE","MF07_PBMC_PRE","MF30_PBMC_PRE",## only method2
+                                         
+                                         "MB59_PBMC_DAY2","MC90_PBMC_DAY2", ### combines method3+1 = 2 total samples for each
+                                         "MC98_PBMC_DAY2", ## only method1
+                                         "MC73_PBMC_DAY2", ## combines method3+2 = 2 total samples
+                                         "MF07_PBMC_DAY2","MF30_PBMC_DAY2", ## only method2
+                                         
+                                    
+                                         "MB59_PBMC_DAY8","MC90_PBMC_DAY8", ## only method 3
+                                         "MC73_PBMC_DAY8","MF07_PBMC_DAY8","MF30_PBMC_DAY8" ## only method 3
+                                         ))
+
+
+
+
+
+### add factorized clean sample
+seuratObj_to_use$sample <- str_after_first(seuratObj_to_use$Sample,"_") %>%
+  str_replace_all("LN_","LN_method1_") %>%
+  str_replace_all("LN3_","LN_method3_") %>%
+  str_replace_all("PBMC_","PBMC_method1_") %>%
+  str_replace_all("PBMC2_","PBMC_method2_") %>%
+  str_replace_all("PBMC3b_","PBMC_method3_") %>% ### combine these 2 techreps
+  str_replace_all("PBMC3_","PBMC_method3_") %>%
+  str_replace_all("POST","DAY2")
+
+seuratObj_to_use$sample <- factor(seuratObj_to_use$sample,
+                                  c("MB59_LN_method1_PRE","MB59_LN_method3_PRE",
+                                    "MC90_LN_method1_PRE","MC90_LN_method3_PRE",
+                                    "MC98_LN_method1_PRE",
+                                    "MF30_LN_method3_PRE",
+                                    
+                                    "MB59_LN_method1_DAY2",
+                                    "MC90_LN_method1_DAY2","MC90_LN_method3_DAY2",
+                                    "MC98_LN_method1_DAY2","MC98_LN_method3_DAY2",
+                                    "MF30_LN_method3_DAY2",
+                                    
+                                    "MB59_LN_method3_DAY8",
+                                    "MC90_LN_method3_DAY8",
+                                    "MC98_LN_method3_DAY8",
+
+                                    "MB59_PBMC_method1_PRE","MB59_PBMC_method3_PRE",##includes 2 reps 
+                                    "MC90_PBMC_method1_PRE","MC90_PBMC_method3_PRE",
+                                    "MC98_PBMC_method1_PRE",
+                                    "MF07_PBMC_method2_PRE",
+                                    "MF30_PBMC_method2_PRE",
+                                    "MC73_PBMC_method2_PRE",
+                                    
+                                    "MB59_PBMC_method1_DAY2","MB59_PBMC_method3_DAY2",
+                                    "MC90_PBMC_method1_DAY2","MC90_PBMC_method3_DAY2",
+                                    "MC98_PBMC_method1_DAY2",
+                                    "MF07_PBMC_method2_DAY2",
+                                    "MF30_PBMC_method2_DAY2",
+                                    "MC73_PBMC_method2_DAY2","MC73_PBMC_method3_DAY2",
+                                    
+                                    "MB59_PBMC_method3_DAY8",
+                                    "MC90_PBMC_method3_DAY8",
+                                    "MF07_PBMC_method3_DAY8",
+                                    "MF30_PBMC_method3_DAY8",
+                                    "MC73_PBMC_method3_DAY8"
+                                    ))
+
+
+seuratObj_to_use$Method <- factor(str_remove_all(str_before_first(str_after_nth(as.character(seuratObj_to_use$sample),"_",2),"_"),"b"),c("method1","method2","method3"))
+
+
+
+######## add in sequencing round
+seuratObj_to_use$round <- str_after_first(seuratObj_to_use$Sample,"_") %>%
+  str_replace_all("LN_","round1_") %>%
+  str_replace_all("PBMC_","round1_") %>%
+  str_replace_all("PBMC2_","round2_") %>%
+  str_replace_all("MF30_PBMC3_","MF30_round3_") %>%
+  str_replace_all("MC73_PBMC3_","MC73_round3_") %>%
+  str_replace_all("MF07_PBMC3_","MF07_round3_") %>%
+  str_replace_all("MB59_PBMC3_PRE","MB59_round4_PRE") %>%
+  str_replace_all("MB59_PBMC3_DAY8","MB59_round4_DAY8") %>%
+  str_replace_all("MB59_PBMC3b_PRE","MB59_round5_PRE") %>%
+  str_replace_all("MB59_PBMC3_POST","MB59_round5_POST") %>%
+  str_replace_all("MC90_PBMC3_PRE","MC90_round4_PRE") %>%
+  str_replace_all("MC90_PBMC3_DAY8","MC90_round4_DAY8") %>%
+  str_replace_all("MC90_PBMC3_POST","MC90_round5_POST") %>%
+  str_replace_all("MB59_LN3_PRE","MB59_round4_PRE") %>%
+  str_replace_all("MB59_LN3_DAY8","MB59_round4_DAY8") %>%
+  str_replace_all("MC90_LN3_PRE","MC90_round4_PRE") %>%
+  str_replace_all("MC90_LN3_DAY8","MC90_round4_DAY8") %>%
+  str_replace_all("MC90_LN3_POST","MC90_round5_POST") %>%
+  str_replace_all("MC98_LN3_","MC98_round5_") %>%
+  str_replace_all("MF30_LN3_","MF30_round5_") %>%
+  str_after_first("_") %>%
+  str_before_last("_")
+
+
+seuratObj_to_use$round <- factor(seuratObj_to_use$round, c("round1","round2","round3","round4","round5"))
+
+
+
+
+
+```
+
+```{r saveSO, eval = eval_save_so}
+saveRDS(seuratObj_to_use, file.path(outputRData_dir,  paste0(str_after_nth(params$study_name,"_",2),"_",suffix_to_use,"_ann.rds")))
+```
+
+```{r setSO, eval = eval_set_so}
+seuratObj_to_use <- readRDS(file.path(outputRData_dir,  paste0(str_after_nth(params$study_name,"_",2),"_",suffix_to_use,"_ann.rds")))
+DefaultAssay(object = seuratObj_to_use) <- default_assay_to_use
+```
+
+### `r paste0(name_to_use)` {.tabset}
+
+
+#### By Animal
+
+``` {r celltypeassignment_plots_1b, fig.width = 8, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Animal",cols = c("brown1","darkorange1","goldenrod1","darkolivegreen2","skyblue2","slateblue1"), raster=FALSE, pt.size= 0.001)
+```
+
+``` {r celltypeassignment_plots_1b_split, fig.width = 24, fig.height = 10}
+DimPlot(seuratObj_to_use,group.by="Animal",split.by="Animal",cols = c("brown1","darkorange1","goldenrod1","darkolivegreen2","skyblue2","slateblue1"), raster=FALSE, pt.size= 0.001,ncol = 3)
+```
+
+#### By Time
+
+``` {r celltypeassignment_plots_1c, fig.width = 8, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Time",cols = c("#5A5399","#817ACD","#C1BBFF"), raster=FALSE, pt.size= 0.001)
+```
+
+``` {r celltypeassignment_plots_1c_split, fig.width = 24, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Time",split.by="Time",cols = c("#5A5399","#817ACD","#C1BBFF"), raster=FALSE, pt.size= 0.001,ncol=3)
+```
+
+#### By Tissue
+
+``` {r celltypeassignment_plots_1d, fig.width = 8, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Tissue",cols = c("#BEBEBE","black"), raster=FALSE, pt.size= 0.001)
+```
+
+
+``` {r celltypeassignment_plots_1d_split, fig.width = 16, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Tissue",split.by="Tissue",cols = c("#BEBEBE","black"), raster=FALSE, pt.size= 0.001, ncol = 2)
+```
+
+#### By PrepMethod
+
+``` {r celltypeassignment_plots_1e, fig.width = 8, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Method",cols = c("#F0E6B4","#C9BD7E","#A49857"), raster=FALSE, pt.size= 0.001)
+```
+
+``` {r celltypeassignment_plots_1e_split, fig.width = 24, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="Method",split.by="Method",cols = c("#F0E6B4","#C9BD7E","#A49857"), raster=FALSE, pt.size= 0.001,ncol = 3)
+```
+
+#### By Round 
+
+``` {r celltypeassignment_plots_1f, fig.width = 8, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="round",cols = c("#A22CDB","#FB66CB","#FBA268","#70B40A","#25679D"), raster=FALSE, pt.size= 0.001)
+```
+
+``` {r celltypeassignment_plots_1f_split, fig.width = 38, fig.height = 5}
+DimPlot(seuratObj_to_use,group.by="round",split.by="round",cols = c("#A22CDB","#FB66CB","#FBA268","#70B40A","#25679D"), raster=FALSE, pt.size= 0.001,ncol = 5)
+```
+
+```{r testRound, results='asis'}
+
+##### confirms that round got assigned correctly
+
+to_print <- as.data.frame.matrix(table(seuratObj_to_use[[c("Sample","round")]], useNA = "ifany")) %>%
+  rownames_to_column("SampleID") %>%
+   DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+            
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+
+
+```
+
+
+
+
+
+```{r setHarm}
+suffix_to_use <- "harmonySample"
+name_to_use <- "Harmony by Sample"
+reduction_to_use <- "harmony"
+default_assay_to_use <- "SCT"
+```
+
+```{r prepSO___harm, ref.label=c('prepSO'), eval = eval_save_so}
+```
+
+```{r saveSO___harm, ref.label=c('saveSO'), eval = eval_save_so}
+```
+
+```{r setSO__harm, ref.label=c('setSO'), eval = eval_set_so}
+```
+
+### `r paste0(name_to_use)` {.tabset}
+
+
+
+#### By Animal
+
+``` {r celltypeassignment_plots_1b__harm, ref.label=c('celltypeassignment_plots_1b'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1b_split__harm,  ref.label=c('celltypeassignment_plots_1b_split'), fig.width = 24, fig.height = 10}
+```
+
+#### By Time
+
+``` {r celltypeassignment_plots_1c__harm, ref.label=c('celltypeassignment_plots_1c'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1c_split__harm, ref.label=c('celltypeassignment_plots_1c_split'), fig.width = 24, fig.height = 5}
+```
+
+#### By Tissue
+
+``` {r celltypeassignment_plots_1d__harm, ref.label=c('celltypeassignment_plots_1d'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1d_split__harm, ref.label=c('celltypeassignment_plots_1d_split'), fig.width = 16, fig.height = 5}
+```
+
+#### By PrepMethod
+
+``` {r celltypeassignment_plots_1e__harm, ref.label=c('celltypeassignment_plots_1e'), fig.width = 8, fig.height = 5}
+```
+
+
+``` {r celltypeassignment_plots_1e_split__harm, ref.label=c('celltypeassignment_plots_1e_split'), fig.width = 24, fig.height = 5}
+```
+
+#### By Round 
+
+```{r celltypeassignment_plots_1f__harm, ref.label=c('celltypeassignment_plots_1f'), fig.width = 8, fig.height = 5}
+```
+
+```{r celltypeassignment_plots_1f_split__harm, ref.label=c('celltypeassignment_plots_1f_split'), fig.width = 38, fig.height = 5}
+```
+
+
+
+
+```{r setCCA}
+suffix_to_use <- "integrated_cca"
+name_to_use <- "cca integration"
+reduction_to_use <- "pca"
+default_assay_to_use <- "integrated"
+```
+
+```{r prepSO___cca, ref.label=c('prepSO'), eval = eval_save_so}
+```
+
+```{r saveSO___cca, ref.label=c('saveSO'), eval = eval_save_so}
+```
+
+```{r setSO__cca, ref.label=c('setSO'), eval = eval_set_so}
+```
+
+### `r paste0(name_to_use)` {.tabset}
+
+#### By Animal
+
+``` {r celltypeassignment_plots_1b__cca, ref.label=c('celltypeassignment_plots_1b'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1b_split__cca,  ref.label=c('celltypeassignment_plots_1b_split'), fig.width = 24, fig.height = 10}
+```
+
+#### By Time
+
+``` {r celltypeassignment_plots_1c__cca, ref.label=c('celltypeassignment_plots_1c'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1c_split__cca, ref.label=c('celltypeassignment_plots_1c_split'), fig.width = 24, fig.height = 5}
+```
+
+#### By Tissue
+
+``` {r celltypeassignment_plots_1d__cca, ref.label=c('celltypeassignment_plots_1d'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1d_split__cca, ref.label=c('celltypeassignment_plots_1d_split'), fig.width = 16, fig.height = 5}
+```
+
+#### By PrepMethod
+
+``` {r celltypeassignment_plots_1e__cca, ref.label=c('celltypeassignment_plots_1e'), fig.width = 8, fig.height = 5}
+```
+
+
+``` {r celltypeassignment_plots_1e_split__cca, ref.label=c('celltypeassignment_plots_1e_split'), fig.width = 24, fig.height = 5}
+```
+
+#### By Round 
+
+```{r celltypeassignment_plots_1f__cca, ref.label=c('celltypeassignment_plots_1f'), fig.width = 8, fig.height = 5}
+```
+
+```{r celltypeassignment_plots_1f_split__cca, ref.label=c('celltypeassignment_plots_1f_split'), fig.width = 38, fig.height = 5}
+```
+
+
+
+
+
+```{r setRPCA}
+suffix_to_use <- "rpca"
+name_to_use <- "rpca integration"
+reduction_to_use <- "pca"
+default_assay_to_use <- "integrated"
+```
+
+```{r prepSO___rpca, ref.label=c('prepSO'), eval = eval_save_so}
+```
+
+```{r saveSO___rpca, ref.label=c('saveSO'), eval = eval_save_so}
+```
+
+```{r setSO__rpca, ref.label=c('setSO'), eval = eval_set_so}
+```
+
+### `r paste0(name_to_use)` {.tabset}
+
+
+
+#### By Animal
+
+``` {r celltypeassignment_plots_1b__rpca, ref.label=c('celltypeassignment_plots_1b'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1b_split__rpca,  ref.label=c('celltypeassignment_plots_1b_split'), fig.width = 24, fig.height = 10}
+```
+
+#### By Time
+
+``` {r celltypeassignment_plots_1c__rpca, ref.label=c('celltypeassignment_plots_1c'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1c_split__rpca, ref.label=c('celltypeassignment_plots_1c_split'), fig.width = 24, fig.height = 5}
+```
+
+#### By Tissue
+
+``` {r celltypeassignment_plots_1d__rpca, ref.label=c('celltypeassignment_plots_1d'), fig.width = 8, fig.height = 5}
+```
+
+``` {r celltypeassignment_plots_1d_split__rpca, ref.label=c('celltypeassignment_plots_1d_split'), fig.width = 16, fig.height = 5}
+```
+
+#### By PrepMethod
+
+``` {r celltypeassignment_plots_1e__rpca, ref.label=c('celltypeassignment_plots_1e'), fig.width = 8, fig.height = 5}
+```
+
+
+``` {r celltypeassignment_plots_1e_split__rpca, ref.label=c('celltypeassignment_plots_1e_split'), fig.width = 24, fig.height = 5}
+```
+
+
+#### By Round 
+
+```{r celltypeassignment_plots_1f__rpca, ref.label=c('celltypeassignment_plots_1f'), fig.width = 8, fig.height = 5}
+```
+
+```{r celltypeassignment_plots_1f_split__rpca, ref.label=c('celltypeassignment_plots_1f_split'), fig.width = 38, fig.height = 5}
+```
+
+
+
+
+
+
+
+## Subclustering {.tabset}
+
+```{r setSO_full}
+
+suffix_to_use <- "rpca"
+default_assay_to_use <- "integrated"
+
+seuratObj_to_use <- readRDS(file.path(outputRData_dir, paste0("batch123_38samps_",suffix_to_use,"_ann.rds")))
+DefaultAssay(object = seuratObj_to_use) <- default_assay_to_use
+
+name_to_use <- "integrated, full"
+
+clust_letter <- "F"
+res_prefix1 <- "SLM_int_snn_"
+
+```
+
+
+
+
+```{r prepSO_rpca, eval = eval_save_so}
+#
+########### only have to do this once
+
+###### set names for "broad clusters" (i.e. pre subclustering) from rex 0.4 -- before merging
+### for testing
+# seuratObj_to_use <- data.frame("SLM_int_snn_res.0.4"=as.character(seq(0,30,1))) %>%
+#   dplyr::mutate(SLM_int_snn_res.0.4 = factor(SLM_int_snn_res.0.4,sort(SLM_int_snn_res.0.4)))
+
+#### first relevel
+seuratObj_to_use$relevel_SLM_int_snn_res.0.4 <- factor(seuratObj_to_use$SLM_int_snn_res.0.4, as.character(seq(0,length(unique(seuratObj_to_use$SLM_int_snn_res.0.4))-1,1)))
+
+
+seuratObj_to_use$respt4_rpca_broadClusters <- NA
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "0")] <- "CD4 T F0"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "1")] <- "CD4 T naive F1"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "2")] <- "CD8 T naive F2"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "3")] <- "CD8 T F3"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "4")] <- "myeloid CL F4"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "5")] <- "CD8 T F5"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "6")] <- "B cell naive F6"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "7")] <- "CD8 T F7"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "8")] <- "B cell nonsw F8"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "9")] <- "CD4 T F9"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "10")] <- "CD4 T Treg F10"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "11")] <- "CD8 T F11"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "12")] <- "DN T F12"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "13")] <- "B cell sw F13"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "14")] <- "T NK F14"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "15")] <- "Neutrophil F15"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "16")] <- "Erythro F16"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "17")] <- "Platelet F17"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "18")] <- "DN T F18"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "19")] <- "CD8 T F19"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "20")] <- "myeloid IN NC F20"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "21")] <- "CD8 T prolif F21"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "22")] <- "B cell naive F22"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "23")] <- "B cell naive prolif F23"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "24")] <- "DN T B F24"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "25")] <- "NK F25"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "26")] <- "myeloid mDC F26"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "27")] <- "myeloid pDC F27"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "28")] <- "prog F28"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "29")] <- "B cell plasmablast F29"
+seuratObj_to_use$respt4_rpca_broadClusters[which(as.character(seuratObj_to_use$relevel_SLM_int_snn_res.0.4) == "30")] <- "GATA3 F30"
+#### factorize
+seuratObj_to_use$respt4_rpca_broadClusters <- factor(seuratObj_to_use$respt4_rpca_broadClusters, c(
+  "B cell naive F6","B cell naive F22","B cell nonsw F8","B cell sw F13","B cell naive prolif F23","B cell plasmablast F29",
+  "CD4 T naive F1","CD4 T Treg F10","CD4 T F0","CD4 T F9",
+  "CD8 T naive F2","CD8 T F3","CD8 T F5","CD8 T F7","CD8 T F11","CD8 T F19","CD8 T prolif F21",
+  "DN T F12","DN T F18","T NK F14","NK F25","DN T B F24",
+  
+  "myeloid CL F4","myeloid IN NC F20","myeloid mDC F26","myeloid pDC F27",
+  "Neutrophil F15","Platelet F17","Erythro F16","prog F28","GATA3 F30"
+  
+))
+
+
+seuratObj_to_use$respt4_rpca_broadClustersCombo_prep <- as.character(seuratObj_to_use$respt4_rpca_broadClusters)
+
+
+# start Combo as a copy of prep (this creates the column), then collapse
+combo <- seuratObj_to_use$respt4_rpca_broadClustersCombo_prep
+
+combo[grepl("^B cell", combo)]                 <- "B cell"
+combo[grepl("^(CD4|CD8|DN) T|^T NK|^NK", combo)] <- "T cell"
+
+seuratObj_to_use$respt4_rpca_broadClustersCombo <- factor(combo, c(
+  "Neutrophil F15","Platelet F17",
+  "B cell","T cell",
+  "GATA3 F30",
+  "myeloid CL F4","myeloid IN NC F20","myeloid mDC F26","myeloid pDC F27",
+  "Erythro F16","prog F28"
+))
+
+# sanity check: should be no NAs
+stopifnot(!anyNA(seuratObj_to_use$respt4_rpca_broadClustersCombo))
+table(seuratObj_to_use$respt4_rpca_broadClustersCombo, useNA = "ifany")
+
+
+```
+
+
+```{r saveSO_rpcaWithBroadClusters, ref.label=c('saveSO'), eval = eval_save_so}
+#
+```
+
+```{r setSO_rpcaWithBroadClusters, ref.label=c('setSO'), eval = eval_set_so}
+```
+
+
+
+
+
+```{r setResPreSubclustering}
+
+
+cols_to_use <- c(
+  "turquoise3", "dodgerblue4",
+  "mediumpurple" ,"orangered3", 
+  "darkblue",
+   "green4","palegreen","olivedrab4","olivedrab2",
+  
+                 
+                
+
+  # "Erythro F16", prog
+  "skyblue1","dodgerblue2"
+  
+)
+  
+ 
+
+
+res_to_use <- "respt4_rpca_broadClustersCombo"
+
+
+```
+
+### FULL pre-Subclustering `r paste0(name_to_use)` - `r paste0(res_to_use)` {.tabset}
+
+#### UMAP
+``` {r celltypeassignment_plots_merge1, fig.width = 14, fig.height = 10}
+DimPlot(seuratObj_to_use,group.by=res_to_use,cols = cols_to_use, raster=FALSE, pt.size= 0.001)
+```
+
+#### UMAP (labeled)
+``` {r celltypeassignment_plots_mergeLabel1, fig.width = 14, fig.height = 10}
+DimPlot(seuratObj_to_use,group.by=res_to_use,cols = cols_to_use,label=T,repel=T, raster=FALSE, pt.size= 0.001)
+```
+
+
+
+
+
+
+```{r setupForSubclustering}
+########## set up full
+seuratObj_full <- seuratObj_to_use
+full_res_to_use <- "respt4_rpca_broadClusters"
+reSCT_or_no <- "_reSCT" #"" for no, "_reSCT" for reSCT
+full_res_prefix1 <- "SLM_int_snn_"
+assay_to_use <- "integrated"
+
+
+
+######### set clusters to subcluster
+
+clusters_to_keep <- list("Lymphoid"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("CD4","CD8","DN","NK"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))], ##16 clusters
+                        # "Myeloid"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("myeloid"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))], ### tried but kept getting separation by animal --> stuck with broad clusters from the full dataset
+                         "Bcell"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("B cell"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))]#,
+                         # "Neutrophil"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("Neutrophil"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))],
+                         # "Platelet"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("Platelet","Erythro"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))]
+                         
+)
+
+
+```
+
+
+
+
+``` {r SubsetToClustersToKeep, include = FALSE, eval = evalSubclustering}
+
+##### once this is run it doesn't need to be run with every rendering
+## run in interactive session to keep track of any errors
+### set default assay
+DefaultAssay(object = seuratObj_full) <- assay_to_use
+### set max to 10G; https://satijalab.org/seurat/archive/v3.0/future_vignette.html
+options(future.globals.maxSize = 100000 * 1024^2)
+
+for(curr_group in names(clusters_to_keep)){
+  curr_clust_to_keep <- clusters_to_keep[[curr_group]]
+  curr_clust_noSpaces <- str_remove_all(curr_clust_to_keep," ")
+
+### subset
+Idents(seuratObj_full) <- full_res_to_use
+seuratObj_to_use <- subset(x = seuratObj_full, idents = curr_clust_to_keep)
+
+###
+npcs = 50
+res_arg = "0.2,0.4,0.6,0.8,1.0,1.2,1.4"
+resolution = as.numeric(as.character(strsplit(gsub(",+",",",as.character(res_arg)),split=",")[[1]]))
+
+# ######## NOT re-running SCT here or rescale Nathan suggestion - this is not the one to use going forward
+# seuratObj_to_use <- ScaleData(object = seuratObj_to_use)
+# seuratObj_to_use <- RunPCA(object = seuratObj_to_use, npcs = npcs, verbose = FALSE)
+# seuratObj_to_use <- FindNeighbors(seuratObj_to_use,dims = 1:npcs)
+#
+# for (res in resolution){
+#   seuratObj_to_use <- FindClusters(seuratObj_to_use,verbose=F, resolution = res,algorithm = 3)#SLM
+# }
+# colnames(seuratObj_to_use@meta.data) = gsub("integrated_snn_res",paste0("Sub_",curr_clust_noSpaces,"only_SLM_int_snn_res"),colnames(seuratObj_to_use@meta.data))
+# colnames(seuratObj_to_use@meta.data) = gsub("^SCT_snn_res",paste0("Sub_",curr_clust_noSpaces,"only_SLM_SCT_snn_res"),colnames(seuratObj_to_use@meta.data))
+# seuratObj_to_use <- RunUMAP(object = seuratObj_to_use, reduction = "pca",
+#                                     dims = 1:npcs, n.components = 2,
+#                            n.neighbors = 30, min.dist = 0.25
+#                            )
+# ### save 
+# saveRDS(seuratObj_to_use,file.path(outputRData_dir,paste0(params$study_name,"_",curr_clust_noSpaces,"only_SCT.rds")))
+
+#
+######## include re-SCTransform
+## re-run SCT https://github.com/satijalab/seurat/issues/4059; https://satijalab.org/seurat/articles/sctransform_v2_vignette.html
+seuratObj_to_use <- SCTransform(object = seuratObj_to_use, vst.flavor = "v2", verbose = FALSE, return.only.var.genes = FALSE)
+
+DefaultAssay(object = seuratObj_to_use) <- assay_to_use
+#seuratObj_to_use <- FindVariableFeatures(object = seuratObj_to_use, nfeatures = 3000) #### for integrated there are only 3000 features, so some are removed when recalculate variable features
+
+## Reproduce original behavior: rank ALL SCT-model genes by residual variance,
+## take the top 3000, then keep only those present in the integrated assay (-> ~1949).
+## Newer Seurat versions pick 3000 directly from the assay's 3000 features, which
+## changes the PCA and clusters.
+hv <- HVFInfo(seuratObj_to_use, assay = "integrated")
+
+   stopifnot("residual_variance" %in% colnames(hv))
+
+top3000 <- rownames(hv)[order(-hv$residual_variance)][1:3000]
+VariableFeatures(seuratObj_to_use, assay = "integrated") <-
+  intersect(top3000, rownames(seuratObj_to_use[["integrated"]]))
+stopifnot(length(VariableFeatures(seuratObj_to_use, assay = "integrated")) > 0)
+   cat(curr_group, ":", length(VariableFeatures(seuratObj_to_use, assay = "integrated")), "variable features\n", file = stderr())
+
+
+
+seuratObj_to_use <- ScaleData(object = seuratObj_to_use)
+seuratObj_to_use <- RunPCA(object = seuratObj_to_use, npcs = npcs, verbose = FALSE)
+seuratObj_to_use <- FindNeighbors(seuratObj_to_use,dims = 1:npcs)
+
+for (res in resolution){
+  seuratObj_to_use <- FindClusters(seuratObj_to_use,verbose=F, resolution = res,algorithm = 3)#SLM
+}
+colnames(seuratObj_to_use@meta.data) = gsub("integrated_snn_res",paste0("Sub_",curr_group,"only_reSCT_SLM_int_snn_res"),colnames(seuratObj_to_use@meta.data))
+colnames(seuratObj_to_use@meta.data) = gsub("^SCT_snn_res",paste0("Sub_",curr_group,"only_reSCT_SLM_SCT_snn_res"),colnames(seuratObj_to_use@meta.data))
+seuratObj_to_use <- RunUMAP(object = seuratObj_to_use, reduction = "pca",
+                                    dims = 1:npcs, n.components = 2,
+                           n.neighbors = 30, min.dist = 0.3
+                           )
+
+
+#### to try differnt umap, none better
+# seuratObj_to_use <- RunUMAP(object = seuratObj_to_use, reduction = "pca",
+#                                     dims = 1:npcs, n.components = 2,
+#                            n.neighbors = 28, min.dist = 0.25
+#                            )
+#
+
+seuratObj_to_use_reSCT <- seuratObj_to_use
+
+#### save 
+saveRDS(seuratObj_to_use_reSCT,file.path(outputRData_dir,paste0(params$study_name,"_SubclusteringBroad_RPCA_",curr_group,"only_reSCT.rds")))
+
+
+}
+
+
+#### save this session info
+writeLines(capture.output(sessionInfo()), file.path(parent_dir, "sessionInfo_subclustering.txt"))
+
+```
+
+
+
+
+
+
+```{r testBcellsubset, eval=FALSE}
+
+module load R/4.4
+R
+
+.libPaths(c("/data/goldfarbmurenkc/R/rhel8/4.4/", .libPaths()))
+sapply(c("Seurat","SeuratObject","sctransform","igraph","irlba","uwot","Matrix"), \(p) as.character(packageVersion(p)))
+      Seurat SeuratObject  sctransform       igraph        irlba         uwot 
+     "5.2.1"      "5.0.2"      "0.4.1"      "2.1.4"    "2.3.5.1"      "0.2.3" 
+      Matrix 
+     "1.7.2" 
+     
+
+module load R/4.3
+R
+
+.libPaths(c("/data/goldfarbmurenkc/R/rhel8/4.3/", .libPaths()))
+sapply(c("Seurat","SeuratObject","sctransform","glmGamPoi","igraph","irlba","uwot","Matrix"), \(p) as.character(packageVersion(p)))
+      Seurat SeuratObject  sctransform       igraph        irlba         uwot 
+     "5.0.1"      "5.0.1"      "0.4.1"      "2.0.3"    "2.3.5.1"      "0.2.2" 
+      Matrix 
+     "1.6.5"      
+
+
+
+old <- readRDS("/data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/RData/ccrvb47_LIONscRNAseq_batch123_38samps_SubclusteringBroad_RPCA_Bcellonly_reSCT.rds")
+new <- readRDS("/data/NCI_VB/felber/ccrvb47_LIONscRNAseq_KCG/ForMS/RData/ccrvb47_LIONscRNAseq_batch123_38samps_SubclusteringBroad_RPCA_Bcellonly_reSCT.rds")
+library(Seurat)
+
+identical(sort(colnames(old)), sort(colnames(new)))
+identical(colnames(old), colnames(new))
+table(old$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4)
+table(new$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4)
+all.equal(abs(Embeddings(old,"pca")[,1:5]), abs(Embeddings(new,"pca")[,1:5]))
+Layers(old[["RNA"]]); Layers(new[["RNA"]])
+old[["SCT"]]@SCTModel.list[[1]]@arguments[c("sct.method","vst.flavor")]
+new[["SCT"]]@SCTModel.list[[1]]@arguments[c("sct.method","vst.flavor")]
+old@version; new@version
+
+
+
+
+> old
+An object of class Seurat 
+43987 features across 79853 samples within 3 assays 
+Active assay: SCT (19226 features, 3000 variable features)
+ 3 layers present: counts, data, scale.data
+ 2 other assays present: RNA, integrated
+ 2 dimensional reductions calculated: pca, umap
+> new
+An object of class Seurat 
+43987 features across 79853 samples within 3 assays 
+Active assay: integrated (3000 features, 3000 variable features)
+ 2 layers present: data, scale.data
+ 2 other assays present: RNA, SCT
+ 2 dimensional reductions calculated: pca, umap
+> identical(sort(colnames(old)), sort(colnames(new)))
+[1] TRUE
+> identical(colnames(old), colnames(new))
+[1] TRUE
+> table(old$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4)
+
+   b0    b1    b2    b3    b4    b5    b6    b7    b8    b9   b10   b11   b12 
+16957 12173 12092 10284  8480  4427  3062  2924  2525  2400  1292   983   976 
+  b13   b14 
+  781   497 
+  
+> table(new$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4)
+
+    0     1     2     3     4     5     6     7     8     9    10    11    12 
+19756 12268 11930  9889  5091  4382  3084  2661  2445  1412  1402  1289  1130 
+   13    14    15    16    17    18 
+  793   771   514   502   368   166 
+> all.equal(abs(Embeddings(old,"pca")[,1:5]), abs(Embeddings(new,"pca")[,1:5]))
+Error in Embeddings(old, "pca") : could not find function "Embeddings"
+> Layers(old[["RNA"]]); Layers(new[["RNA"]])
+Error in Layers(old[["RNA"]]) : could not find function "Layers"
+> old[["SCT"]]@SCTModel.list[[1]]@arguments[c("sct.method","vst.flavor")]
+$<NA>
+NULL
+
+
+
+library(Seurat)
+
+
+
+old[["pca"]]@assay.used;  new[["pca"]]@assay.used
+names(old@commands);      names(new@commands)      # look for RunPCA.SCT vs RunPCA.integrated, FindNeighbors.SCT vs .integrated
+names(old@graphs);        names(new@graphs)        # SCT_snn vs integrated_snn
+grep("snn_res", colnames(old@meta.data), value = TRUE)
+grep("snn_res", colnames(new@meta.data), value = TRUE)
+
+
+
+# did the integrated input stay the same?
+identical(LayerData(old, assay="integrated", layer="data"),
+          LayerData(new, assay="integrated", layer="data"))
+
+# variable features and scaling
+vf_o <- VariableFeatures(old, assay="integrated"); vf_n <- VariableFeatures(new, assay="integrated")
+length(vf_o); length(vf_n); setequal(vf_o, vf_n); identical(vf_o, vf_n)
+all.equal(LayerData(old, assay="integrated", layer="scale.data"),
+          LayerData(new, assay="integrated", layer="scale.data"))
+
+# PCs, ignoring sign
+all.equal(abs(Embeddings(old,"pca")[,1:10]), abs(Embeddings(new,"pca")[,1:10]))
+
+# nearest-neighbour and SNN graphs (cells are in the same order, so they're directly comparable)
+all.equal(old@graphs$integrated_nn,  new@graphs$integrated_nn)
+all.equal(old@graphs$integrated_snn, new@graphs$integrated_snn)
+
+# what each step was called with (and timestamps)
+Command(old, "FindVariableFeatures.integrated"); Command(new, "FindVariableFeatures.integrated")
+Command(old, "ScaleData.integrated");            Command(new, "ScaleData.integrated")
+Command(old, "RunPCA.integrated");               Command(new, "RunPCA.integrated")
+Command(old, "FindNeighbors.integrated.pca");    Command(new, "FindNeighbors.integrated.pca")
+Command(old, "FindClusters");                    Command(new, "FindClusters")
+
+# how the two partitions relate (new numeric labels vs old b-labels)
+table(old = old$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4, new = new$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4)
+
+
+
+$vst.flavor
+[1] "v2"
+
+> new[["SCT"]]@SCTModel.list[[1]]@arguments[c("sct.method","vst.flavor")]
+$<NA>
+NULL
+
+$vst.flavor
+[1] "v2"
+
+> old@version; new@version
+[1] ‘4.1.3’
+[1] ‘4.1.3’
+> 
+
+
+
+
+
+module purge
+module load R/4.4
+export R_LIBS_USER="/data/NCI_VB/$USER/R_libs/4.4"
+R
+
+.libPaths()
+sapply(c("Seurat","SeuratObject","sctransform","glmGamPoi","igraph","irlba","uwot","Matrix"),
+       \(p) tryCatch(as.character(packageVersion(p)), error = \(e) NA))
+
+> .libPaths()
+[1] "/vf/users/NCI_VB/goldfarbmurenkc/R_libs/4.4"
+[2] "/usr/local/apps/R/4.4/site-library_4.4.3"   
+[3] "/usr/local/apps/R/4.4/4.4.3/lib64/R/library"
+> sapply(c("Seurat","SeuratObject","sctransform","glmGamPoi","igraph","irlba","uwot","Matrix"),
++        \(p) tryCatch(as.character(packageVersion(p)), error = \(e) NA))
+      Seurat SeuratObject  sctransform    glmGamPoi       igraph        irlba 
+     "5.3.1"      "5.2.0"      "0.4.2"     "1.18.0"      "2.2.1"    "2.3.5.1" 
+        uwot       Matrix 
+     "0.2.4"      "1.7.2" 
+> 
+
+       
+       
+module purge
+module load R/4.3
+export R_LIBS_USER="/data/NCI_VB/$USER/R_libs/4.3"
+R
+
+.libPaths()
+sapply(c("Seurat","SeuratObject","sctransform","glmGamPoi","igraph","irlba","uwot","Matrix"),
+       \(p) tryCatch(as.character(packageVersion(p)), error = \(e) NA))
+
+> .libPaths()
+[1] "/vf/users/NCI_VB/goldfarbmurenkc/R_libs/4.3"
+[2] "/usr/local/apps/R/4.3/site-library_4.3.2"   
+[3] "/usr/local/apps/R/4.3/4.3.2/lib64/R/library"
+> sapply(c("Seurat","SeuratObject","sctransform","glmGamPoi","igraph","irlba","uwot","Matrix"),
++        \(p) tryCatch(as.character(packageVersion(p)), error = \(e) NA))
+      Seurat SeuratObject  sctransform    glmGamPoi       igraph        irlba 
+     "5.4.0"      "5.3.0"      "0.4.3"     "1.14.3"      "2.2.1"    "2.3.5.1" 
+        uwot       Matrix 
+     "0.2.4"      "1.6.5" 
+     
+     
+     
+     
+############# the actual test
+
+ho$in_old <- NULL                                    # remove the column you added
+top3000 <- rownames(ho)[order(-ho$residual_variance)][1:3000]
+integ_feats <- rownames(old[["integrated"]])
+
+cand <- intersect(top3000, integ_feats)
+length(cand)                                         # does it equal 1949?
+setequal(cand, vf_o)                                 # same set as the old object?
+identical(cand, vf_o)                                # same order as well?
+# ties and ordering: check how many genes share the cutoff value
+sort(ho$residual_variance, decreasing = TRUE)[2995:3005]
+# top N from only the genes shared with the assay
+ho_i <- ho[rownames(ho) %in% integ_feats, ]
+nrow(ho_i)
+
+
+n <- news(package = "Seurat")
+n[grepl("SCTAssay|FindVariableFeatures|residual_variance", n$Text, ignore.case = TRUE), ]
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r setSubset___subBcells}
+##### can run from here onwards
+curr_clust_to_keep <- "Bcell"
+clust_letter <- tolower(substring(curr_clust_to_keep,1,1))
+res_prefix1 <- paste0("Sub_",curr_clust_to_keep,"only_reSCT_SLM_int_snn_")
+assay_to_use <- "integrated"
+```
+
+```{r setSO_subsetted, eval = evalSaveSubSOs}
+
+####### load subsetted seurat object
+seuratObj_to_use_prep <- readRDS(file.path(outputRData_dir,paste0("ccrvb47_LIONscRNAseq_batch123_38samps_SubclusteringBroad_RPCA_",curr_clust_to_keep,"only_reSCT.rds")))
+
+
+# 
+# message("ncol: ", ncol(seuratObj_to_use_prep))
+# message("nrow meta: ", nrow(seuratObj_to_use_prep@meta.data))
+# message("nrow umap: ", nrow(seuratObj_to_use_prep@reductions$umap@cell.embeddings))
+# 
+
+
+DefaultAssay(object = seuratObj_to_use_prep) <- assay_to_use
+```
+
+
+### subsetted `r paste0(curr_clust_to_keep)`, subclusters called "`r paste0(clust_letter)`" {.tabset}
+
+
+
+``` {r setRes___subBcells_naming, eval = evalSaveSubSOs}
+
+res_to_use <- paste0(res_prefix1,"res.0.4")  # Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4
+
+# stopifnot(res_to_use %in% colnames(seuratObj_to_use_prep@meta.data))
+# 
+# vals <- as.character(seuratObj_to_use_prep[[res_to_use]][,1])
+# cat("DIAG Sub col values: ", paste(head(sort(unique(vals)), 20), collapse = ","), "\n", file = stderr())
+# 
+# ## add letter prefix only if not already present
+# if (!all(grepl(paste0("^", clust_letter, "[0-9]+$"), vals))) vals <- paste0(clust_letter, vals)
+# seuratObj_to_use_prep[[res_to_use]][,res_to_use] <- factor(
+#   vals, paste0(clust_letter, 0:(length(unique(vals)) - 1)))
+
+
+# ##### relevel add clust_letter 
+seuratObj_to_use_prep[[res_to_use]][,res_to_use] <- factor(paste0(clust_letter,seuratObj_to_use_prep[[res_to_use]][,res_to_use]), paste0(clust_letter,as.character(seq(0,length(unique(seuratObj_to_use_prep[[res_to_use]][,res_to_use]))-1,1))))
+
+
+### add preliminary names
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4 <- NA
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b0")] <- "Bcell naive b0"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b1")] <- "Bcell nonsw b1"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b2")] <- "Bcell sw b2"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b3")] <- "Bcell mix b3"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b4")] <- "Bcell naive b4"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b5")] <- "Bcell CD3 b5"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b6")] <- "Bcell naive LN b6"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b7")] <- "Bcell naive b7"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b8")] <- "Bcell naive b8"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b9")] <- "Bcell naive MF30 b9"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b10")] <- "Bcell sw b10"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b11")] <- "Bcell naive MF30 b11"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b12")] <- "Bcell naive LN b12"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b13")] <- "Bcell prolif LN b13"
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4[which(as.character(seuratObj_to_use_prep$Sub_Bcellonly_reSCT_SLM_int_snn_res.0.4) == "b14")] <- "Bcell plasmablast b14"
+
+
+
+
+seuratObj_to_use_prep$rpca_SubBcellClusters_respt4 <- factor(seuratObj_to_use_prep$rpca_SubBcellClusters_respt4,
+                                                        c("Bcell naive b0","Bcell naive b4","Bcell naive b7","Bcell naive b8",
+                                                          "Bcell naive LN b6","Bcell naive LN b12","Bcell prolif LN b13",
+                                                          "Bcell naive MF30 b9","Bcell naive MF30 b11",
+                                                          "Bcell nonsw b1",
+                                                          "Bcell sw b2","Bcell sw b10",
+                                                          "Bcell mix b3",
+                                                          "Bcell CD3 b5",
+                                                          "Bcell plasmablast b14"))
+
+
+
+
+
+stopifnot(!anyNA(seuratObj_to_use_prep$rpca_SubBcellClusters_respt4))
+
+
+saveRDS(seuratObj_to_use_prep, file.path(outputRData_dir,paste0(params$study_name,"_",curr_clust_to_keep,"only_reSCT.rds")))
+
+saveRDS(seuratObj_to_use_prep@meta.data[, "rpca_SubBcellClusters_respt4", drop=FALSE],
+        file.path(outputRData_dir, paste0(params$study_name,"_",curr_clust_to_keep,"_subclusterNames.rds")))
+
+```
+
+
+
+
+``` {r setRes___subBcells}
+res_to_use <- "rpca_SubBcellClusters_respt4"
+
+cols_to_use <- c(
+  #### naive
+  "lightblue1","lightblue3","darkslategray1","darkslategray3",
+  "lightblue4","skyblue4","darkslategray",
+  "gray70","gray20",
+  ## nonsw
+  "mediumpurple1",
+  ## sw
+  "purple3","purple4",
+  ## mix
+  "slateblue1",
+  ## cd3
+  "purple",
+  ## plasmablaste
+  "slateblue4"
+)
+
+
+seuratObj_to_use <- readRDS(file.path(outputRData_dir,paste0(params$study_name,"_",curr_clust_to_keep,"only_reSCT.rds")))
+
+
+diag_file <- file.path(outputTABLES_dir, "diag_subBcells.txt")
+dlog <- function(...) {
+  txt <- paste0(format(Sys.time(), "%H:%M:%S"), " DIAG ", paste0(..., collapse = ""))
+  cat(txt, "\n", file = stderr())
+  cat(txt, "\n", file = diag_file, append = TRUE)
+}
+dlog("Seurat ", as.character(packageVersion("Seurat")), " | SeuratObject ", as.character(packageVersion("SeuratObject")))
+dlog("file: ", file.path(outputRData_dir, paste0(params$study_name,"_",curr_clust_to_keep,"only_reSCT.rds")))
+dlog("ncol=", ncol(seuratObj_to_use), " | meta rows=", nrow(seuratObj_to_use@meta.data),
+     " | umap rows=", nrow(Embeddings(seuratObj_to_use, "umap")))
+dlog("rownames(meta)==colnames(obj): ", identical(rownames(seuratObj_to_use@meta.data), colnames(seuratObj_to_use)),
+     " | umap rownames match: ", identical(rownames(Embeddings(seuratObj_to_use, "umap")), colnames(seuratObj_to_use)))
+dlog("has '", res_to_use, "': ", res_to_use %in% colnames(seuratObj_to_use@meta.data))
+dlog("Sub cols: ", paste(grep("Sub|rpca_Sub", colnames(seuratObj_to_use@meta.data), value = TRUE), collapse = ", "))
+if (res_to_use %in% colnames(seuratObj_to_use@meta.data)) {
+  dlog("class: ", paste(class(seuratObj_to_use@meta.data[[res_to_use]]), collapse = "/"),
+       " | n NA: ", sum(is.na(seuratObj_to_use@meta.data[[res_to_use]])))
+  dlog("table: ", paste(names(table(seuratObj_to_use@meta.data[[res_to_use]], useNA = "ifany")),
+                        table(seuratObj_to_use@meta.data[[res_to_use]], useNA = "ifany"), sep = "=", collapse = "; "))
+}
+tmp <- seuratObj_to_use[[res_to_use]]
+dlog("obj[[res_to_use]] dim: ", paste(dim(tmp), collapse = " x "))
+dlog("DefaultAssay: ", DefaultAssay(seuratObj_to_use), " | reductions: ", paste(names(seuratObj_to_use@reductions), collapse = ","))
+
+```
+
+
+`r paste0(length(VariableFeatures(seuratObj_to_use, assay = "integrated")))` variable features for this subset
+
+
+#### UMAP
+```{r celltypeassignment_plots_merge1___subBcells, ref.label=c('celltypeassignment_plots_merge1'), fig.width = 16, fig.height = 10}
+```
+
+#### UMAP (labeled)
+```{r celltypeassignment_plots_mergeLabel1___subBcells, ref.label=c('celltypeassignment_plots_mergeLabel1'), fig.width = 16, fig.height = 10}
+```
+
+
+
+#### boxplot by time {.tabset}
+
+
+``` {r boxplot_group1, fig.height=10, fig.width = 10, results = 'asis'}
+### set levels
+### for res that already have levels
+if(grepl(paste(c("SLM_", "Clusters","clusters","BROAD"),collapse = '|'),res_to_use)){
+  clust_levels <- levels(seuratObj_to_use[[res_to_use]][,res_to_use])
+}else{
+  clust_levels <- make.names(c(sort(unique(seuratObj_to_use[[res_to_use]][,res_to_use])),"NA"))
+}
+
+
+
+###### for each tissue separately
+
+for(curr_tiss in levels(seuratObj_to_use$Tissue)){
+  
+    curr_so <- subset(x = seuratObj_to_use, subset = Tissue == curr_tiss)
+
+  ##first, ignoring method
+  cat("##### ",paste0(curr_tiss, " ignoring method {.tabset}"),"\n")
+cat("\n")
+
+  
+ group_tab <- as.data.frame.matrix(table(curr_so[[c(res_to_use,"Animal_time")]], useNA = "ifany")) %>%
+  rownames_to_column("cluster") %>%
+
+  ### collect % of each celltype for each animal
+  
+  ### make longer 
+  tidyr::pivot_longer(cols = !cluster, names_to = "Animal_time", values_to = "NumCells") %>%
+  dplyr::arrange(Animal_time) %>%
+  ### collect % of each sample (i.e Animal_time)
+  group_by(Animal_time) %>%
+  dplyr::mutate(pct = round(100*NumCells/sum(NumCells),4)) %>%
+  ungroup() %>%
+  ### collect FC within rep
+  dplyr::mutate(Animal = str_before_first(Animal_time, "_"),
+                Time = factor(str_after_last(Animal_time,"_"),c("PRE","DAY2","DAY8"))) %>%
+  dplyr::arrange(cluster, Animal, Time) %>%
+  group_by(cluster, Animal) %>%
+  dplyr::mutate(FC = round(pct/pct[1L],4),
+                log2FC = round(log2(FC),4)) %>%
+  ungroup() %>%
+  ### rename FC to include the days
+  dplyr::mutate(comparison = paste0(Time,"vsPRE"),
+                cluster = factor(cluster, clust_levels)) %>%
+  dplyr::select(-Animal,-Time)
+
+
+### select only  the pct for boxplot
+group_tab2 <- group_tab %>%
+  dplyr::select(cluster, Animal_time,pct) %>%
+  dplyr::mutate(Animal = str_before_first(Animal_time, "_"),
+                Time = factor(str_after_last(Animal_time,"_"),c("PRE","DAY2","DAY8"))) 
+ 
+       cat("###### ",paste0("plot"),"\n")
+cat("\n")
+
+
+ cat(" ",paste0("p by paired MW wilcoxon"),"\n")
+  cat('\n')
+
+v <- group_tab2 %>%
+  ggboxplot(x = "Time", y = "pct",
+            fill = "Time", palette = c("grey20","grey50","grey80"),
+            facet.by = "cluster", scales = "free_y")+
+  #geom_beeswarm()+
+  stat_compare_means(aes(group = Time), 
+                     comparisons = list(c("DAY2","PRE"),c("DAY8","PRE"),
+                                        c("DAY8","DAY2")),
+                     label = "p.format", method = "wilcox.test", paired = TRUE, 
+                     #label.x = 1.25,
+                     size = 2)+
+  geom_point(aes(shape=Animal), size = 3, fill = "white", color = "black")+
+  scale_shape_manual(values = c(21, 22, 24, 25, 23, 8))+
+  geom_line(aes(group=Animal), color = "grey")+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+plot(v)
+
+cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+ 
+        cat("###### ",paste0("table Pct"),"\n")
+cat("\n")
+
+to_print <- group_tab2 %>%
+   DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+            
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+
+ cat("\n")
+  cat(' \n \n') ### this is the key!
+
+
+
+
+  
+}
+
+cat("\n")
+cat(' \n \n') ### this is the key!
+
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r setSubset___subTcells}
+curr_clust_to_keep <- "Lymphoid"
+clust_letter <- tolower(substring(curr_clust_to_keep,1,1))
+res_prefix1 <- paste0("Sub_",curr_clust_to_keep,"only_reSCT_SLM_int_snn_")
+assay_to_use <- "integrated"
+
+```
+
+```{r setSO_subsetted___subTcells, ref.label=c('setSO_subsetted'), eval = evalSaveSubSOs}
+```
+
+
+### subsetted `r paste0(curr_clust_to_keep)`, subclusters called "`r paste0(clust_letter)`" {.tabset}
+
+
+
+``` {r setRes___subTecells_naming, eval = evalSaveSubSOs}
+res_to_use <- paste0(res_prefix1,"res.0.6")  # Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6
+
+# stopifnot(res_to_use %in% colnames(seuratObj_to_use_prep@meta.data))
+# 
+# vals <- as.character(seuratObj_to_use_prep[[res_to_use]][,1])
+# cat("DIAG Sub col values: ", paste(head(sort(unique(vals)), 20), collapse = ","), "\n", file = stderr())
+# 
+# ## add letter prefix only if not already present
+# if (!all(grepl(paste0("^", clust_letter, "[0-9]+$"), vals))) vals <- paste0(clust_letter, vals)
+# seuratObj_to_use_prep[[res_to_use]][,res_to_use] <- factor(
+#   vals, paste0(clust_letter, 0:(length(unique(vals)) - 1)))
+
+
+# ##### relevel add clust_letter 
+seuratObj_to_use_prep[[res_to_use]][,res_to_use] <- factor(paste0(clust_letter,seuratObj_to_use_prep[[res_to_use]][,res_to_use]), paste0(clust_letter,as.character(seq(0,length(unique(seuratObj_to_use_prep[[res_to_use]][,res_to_use]))-1,1))))
+
+
+
+
+
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6 <- NA
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l0")] <- "CD4 naive l0"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l1")] <- "CD4 Tfh mix l1"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l2")] <- "CD8 naive l2"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l3")] <- "CD8 DP gd l3"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l4")] <- "CD8 Vd2 gd l4"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l5")] <- "CD8 NK l5"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l6")] <- "CD4 Treg l6"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l7")] <- "CD8 MAIT l7"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l8")] <- "CD3neg CD8 NK l8"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l9")] <- "CD4 Th1 Th17 l9"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l10")] <- "NK l10"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l11")] <- "CD4 naive l11"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l12")] <- "CD4 Tfh mix l12"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l13")] <- "CD4 Tfh mix l13"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l14")] <- "DP Th1 Th17 l14"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l15")] <- "DN l15"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l16")] <- "DN CM Treg l16"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l17")] <- "CD8 gd l17"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l18")] <- "DN neut mye l18"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l19")] <- "CD4 naive l19"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l20")] <- "CD8 DP prolif l20"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l21")] <- "DP naive l21"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l22")] <- "DN B CM Treg l22"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l23")] <- "CD4 Tfh l23"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l24")] <- "CD8 DP gd l24"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l25")] <- "DN MAIT l25"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l26")] <- "CD3neg CD8 MS4A1 NK l26"
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6[which(as.character(seuratObj_to_use_prep$Sub_Lymphoidonly_reSCT_SLM_int_snn_res.0.6) == "l27")] <- "DP B l27"
+
+
+seuratObj_to_use_prep$rpca_SubLymphClusters_respt6 <- factor(seuratObj_to_use_prep$rpca_SubLymphClusters_respt6,
+                                                        c("CD4 naive l0","CD4 naive l11","CD4 naive l19",
+                                                          "CD4 Treg l6","CD4 Th1 Th17 l9","CD4 Tfh l23",
+                                                          "CD4 Tfh mix l1","CD4 Tfh mix l12","CD4 Tfh mix l13",
+                                                          
+                                                          "CD8 naive l2",
+                                                          "CD8 Vd2 gd l4","CD8 gd l17","CD8 NK l5",
+                                                          "CD8 MAIT l7",
+                                                          
+                                                          "CD8 DP gd l3","CD8 DP gd l24",
+                                                          "CD8 DP prolif l20",     
+                                                          
+                                                          "DP naive l21","DP Th1 Th17 l14","DP B l27",
+
+                                                          "DN l15","DN MAIT l25",
+                                                          "DN CM Treg l16","DN B CM Treg l22",
+                                                          "DN neut mye l18",
+                                                          
+                                                          "NK l10",
+                                                          "CD3neg CD8 NK l8","CD3neg CD8 MS4A1 NK l26"))
+
+
+
+
+
+
+### save
+
+saveRDS(seuratObj_to_use_prep, file.path(outputRData_dir,paste0(params$study_name,"_",curr_clust_to_keep,"only_reSCT.rds")))
+
+
+
+```
+
+
+
+
+``` {r setRes___subTcells}
+res_to_use <- "rpca_SubLymphClusters_respt6"
+
+cols_to_use <- c(
+   ### CD4 T cells
+  "gold1","darkgoldenrod1","darkgoldenrod3",
+  "darkorange1","darkorange4",
+  "burlywood1","burlywood3","burlywood4","burlywood4",
+
+  #### CD8 T
+  "orchid1","orchid3","orchid4","mediumorchid1","magenta3",
+
+  ### CD8 DP T
+  "deeppink1","deeppink3","deeppink4",
+
+  #### DP
+  "lightpink","lightpink3","lightpink4",
+
+  #### DN
+  "tan4","magenta4","lightgoldenrod1","lightgoldenrod3",
+  "khaki4",
+
+  #### NK/CD3neg
+  "hotpink1","hotpink3","hotpink4"
+)
+
+seuratObj_to_use <- readRDS(file.path(outputRData_dir,paste0(params$study_name,"_",curr_clust_to_keep,"only_reSCT.rds")))
+
+
+```
+
+
+`r paste0(length(VariableFeatures(seuratObj_to_use, assay = "integrated")))` variable features for this subset
+
+
+#### UMAP
+```{r celltypeassignment_plots_merge1___subTcells, ref.label=c('celltypeassignment_plots_merge1'), fig.width = 16, fig.height = 10}
+```
+
+#### UMAP (labeled)
+```{r celltypeassignment_plots_mergeLabel1___subTcells, ref.label=c('celltypeassignment_plots_mergeLabel1'), fig.width = 16, fig.height = 10}
+```
+
+#### boxplot by time {.tabset}
+
+``` {r boxplot_group1___subTcells, ref.label=c('boxplot_group1'), fig.height=12, fig.width = 10, results = 'asis'}
+```
+
+
+
+```{r setSO_rpca_full, ref.label=c('setSO'), eval = eval_set_so}
+```
+
+
+```{r addSubclustersToFull, eval = evalSubsToFull}
+#### only have to do this once
+
+# clusters_to_keep <- list("Lymphoid"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("CD4","CD8","DN","NK"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))], ##16 clusters
+#                          "Myeloid"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("myeloid"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))],
+#                          "Bcell"=levels(seuratObj_to_use$respt4_rpca_broadClusters)[grepl(paste0(c("B cell"), collapse = '|'),levels(seuratObj_to_use$respt4_rpca_broadClusters))]
+#                          
+# )
+
+############### also add betternames
+seuratObj_to_use$respt4_rpca_ClustersWithSubs_prep <- as.character(seuratObj_to_use$respt4_rpca_broadClusters) ### start with seuratObj_to_use$respt4_rpca_broadClusters
+
+
+
+#### for testing
+# unique(seuratObj_to_use$respt4_rpca_ClustersWithSubs_prep)
+# curr_obj <- subset(seuratObj_to_use, subset = Method == "method3")
+# curr_obj$Testing <- factor(curr_obj$sample, unique(curr_obj$sample))
+# curr_res <- "Testing"
+#  seuratObj_to_use@meta.data[Cells(curr_obj), "respt4_rpca_ClustersWithSubs_prep"] <- paste0(
+# as.character(curr_obj[[curr_res]][,curr_res]))
+# unique(seuratObj_to_use$respt4_rpca_ClustersWithSubs_prep)
+
+### dataframe with which res for each subclsutered category
+subclust_res_to_use_df <- data.frame("cluster"=c("Bcell","Lymphoid"),
+                                     ### chosen res
+                                     "res"=c("rpca_SubBcellClusters_respt4","rpca_SubLymphClusters_respt6"))
+#### for each subclsutered object
+for(curr_subclustered in subclust_res_to_use_df$cluster){
+  curr_res <- subclust_res_to_use_df$res[which(subclust_res_to_use_df$cluster == curr_subclustered)]
+
+  curr_obj <- readRDS(file.path(outputRData_dir, paste0(params$study_name,"_",curr_subclustered,"only_reSCT.rds")))
+  seuratObj_to_use@meta.data[Cells(curr_obj), "respt4_rpca_ClustersWithSubs_prep"] <- paste0(
+as.character(curr_obj[[curr_res]][,curr_res]))
+    
+  
+}
+
+
+##### now factorize all together
+seuratObj_to_use$respt4_rpca_ClustersWithSubs <- factor(seuratObj_to_use$respt4_rpca_ClustersWithSubs_prep,
+                                                        c(
+                                                          #### bcells subclsuters
+  "Bcell naive b0","Bcell naive b4","Bcell naive b7","Bcell naive b8",
+                                                          "Bcell naive LN b6","Bcell naive LN b12","Bcell prolif LN b13",
+                                                          "Bcell naive MF30 b9","Bcell naive MF30 b11",
+                                                          "Bcell nonsw b1",
+                                                          "Bcell sw b2","Bcell sw b10",
+                                                          "Bcell mix b3",
+                                                          "Bcell CD3 b5",
+                                                          "Bcell plasmablast b14",
+  
+  ##### t.cells subclusters
+  
+  "CD4 naive l0","CD4 naive l11","CD4 naive l19",
+                                                          "CD4 Treg l6","CD4 Th1 Th17 l9","CD4 Tfh l23",
+                                                          "CD4 Tfh mix l1","CD4 Tfh mix l12","CD4 Tfh mix l13",
+                                                          
+                                                          "CD8 naive l2",
+                                                          "CD8 Vd2 gd l4","CD8 gd l17","CD8 NK l5",
+                                                          "CD8 MAIT l7",
+                                                          
+                                                          "CD8 DP gd l3","CD8 DP gd l24",
+                                                          "CD8 DP prolif l20",     
+                                                          
+                                                          "DP naive l21","DP Th1 Th17 l14","DP B l27",
+
+                                                          "DN l15","DN MAIT l25",
+                                                          "DN CM Treg l16","DN B CM Treg l22",
+                                                          "DN neut mye l18",
+                                                          
+                                                          "NK l10",
+                                                          "CD3neg CD8 NK l8","CD3neg CD8 MS4A1 NK l26",
+  
+
+  #### keep from full subclustering
+  
+  "myeloid CL F4","myeloid IN NC F20","myeloid mDC F26","myeloid pDC F27",
+  "Neutrophil F15","Platelet F17","Erythro F16","prog F28","GATA3 F30"
+  
+))
+
+```
+
+```{r saveSO_rpcaWithSubs, ref.label=c('saveSO'), eval = eval_save_so}
+#
+```
+
+```{r setSO_rpcaWithSubs, ref.label=c('setSO'), eval = eval_set_so & !evalSubsToFull}
+```
+
+
+
+``` {r setRes__withSubs}
+res_to_use <- "respt4_rpca_ClustersWithSubs"
+name_to_use <- "integrated, full"
+
+
+#  c(
+#                                                           #### bcells subclsuters
+#   "Bcell naive b0","Bcell naive b4","Bcell naive b7","Bcell naive b8",
+#                                                           "Bcell naive LN b6","Bcell naive LN b12","Bcell prolif LN b13",
+#                                                           "Bcell naive MF30 b9","Bcell naive MF30 b11",
+#                                                           "Bcell nonsw b1",
+#                                                           "Bcell sw b2","Bcell sw b10",
+#                                                           "Bcell mix b3",
+#                                                           "Bcell CD3 b5",
+#                                                           "Bcell plasmablast b14",
+#   
+#   ##### t.cells subclusters
+#   
+#   "CD4 naive l0","CD4 naive l11","CD4 naive l19",
+#                                                           "CD4 Treg l6","CD4 Th1 Th17 l9","CD4 Tfh l23",
+#                                                           "CD4 Tfh mix l1","CD4 Tfh mix l12","CD4 Tfh mix l13",
+#                                                           
+#                                                           "CD8 naive l2",
+#                                                           "CD8 Vd2 gd l4","CD8 gd l17","CD8 NK l5",
+#                                                           "CD8 MAIT l7",
+#                                                           
+#                                                           "CD8 DP gd l3","CD8 DP gd l24",
+#                                                           "CD8 DP prolif l20",     
+#                                                           
+#                                                           "DP naive l21","DP Th1 Th17 l14","DP B l27",
+# 
+#                                                           "DN l15","DN MAIT l25",
+#                                                           "DN CM Treg l16","DN B CM Treg l22",
+#                                                           "DN neut mye l18",
+#                                                           
+#                                                           "NK l10",
+#                                                           "CD3neg CD8 NK l8","CD3neg CD8 MS4A1 NK l26",
+#   
+# 
+#   #### keep from full subclustering
+#   
+#   "myeloid CL F4","myeloid IN NC F20","myeloid mDC F26","myeloid pDC F27",
+#   "Neutrophil F15","Platelet F17","Erythro F16","prog F28","GATA3 F30"
+#   
+# )
+  
+cols_to_use <- c( 
+  ### B cells
+#### naive
+  "lightblue1","lightblue3","darkslategray1","darkslategray3",
+  "lightblue4","skyblue4","darkslategray",
+  "gray70","gray20",
+  ## nonsw
+  "mediumpurple1",
+  ## sw
+  "purple3","purple4",
+  ## mix
+  "slateblue1",
+  ## cd3
+  "purple",
+  ## plasmablaste
+  "slateblue4",
+  
+  
+  ####### T cells
+  
+    ### CD4 T cells
+  "gold1","darkgoldenrod1","darkgoldenrod3",
+  "darkorange1","darkorange4",
+  "burlywood1","burlywood3","burlywood4","burlywood4",
+  
+  #### CD8 T
+  "orchid1","orchid3","orchid4","mediumorchid1","magenta3",
+  
+  ### CD8 DP T
+  "deeppink1","deeppink3","deeppink4",
+  
+  #### DP
+  "lightpink","lightpink3","lightpink4",
+  
+  #### DN
+  "tan4","magenta4","lightgoldenrod1","lightgoldenrod3",
+  "khaki4",
+  
+  #### NK/CD3neg  
+  "hotpink1","hotpink3","hotpink4",
+  
+  
+  
+  
+  
+  ### myeloid
+"green4","palegreen","olivedrab4","olivedrab2",
+
+### other
+"turquoise3",
+"dodgerblue4","skyblue1","dodgerblue2","darkblue"
+
+  
+)
+
+```
+
+
+### FULL POST-Subclustering `r paste0(name_to_use)` - `r paste0(res_to_use)` {.tabset}
+
+
+#### UMAP
+``` {r celltypeassignment_plots_merge1__withSubs, ref.label=c('celltypeassignment_plots_merge1'), fig.width = 14, fig.height = 5}
+```
+
+#### UMAP (labeled)
+``` {r celltypeassignment_plots_mergeLabel1__withSubs, ref.label=c('celltypeassignment_plots_mergeLabel1'), fig.width = 14, fig.height = 5}
+```
+
+#### boxplot by time {.tabset}
+
+ignoring method
+
+``` {r boxplot_group1__withSubs, ref.label=c('boxplot_group1'), fig.height=14, fig.width = 10, results = 'asis'}
+```
+
+
+
+
+
+
+
+
+### TRIMMING PBMC/LN clusters {.tabset}
+
+#### Prep tables {.tabset}
+
+```{r trimSO_byComp_tables, results='asis'}
+
+####### remove cells from clusters with:
+## less than 20 cells per tissue
+## more than 10 samples with < 3 cells/sample
+
+#### first generate table with total number of cells per tissue
+
+
+
+  
+           cat("##### ",paste0("table Num Cells per tissue"),"\n")
+cat("\n")
+
+tiss_df <- as.data.frame.matrix(table(seuratObj_to_use[[c(res_to_use, "Tissue")]])) %>%
+  rownames_to_column("cluster") %>%
+  ### add helper column
+  dplyr::mutate(helper = ifelse(LN < 20, 
+                                ifelse(PBMC < 20,
+                                       "tossPBMC_tossLN",
+                                       "tossLN_only"),
+                                ifelse(PBMC < 20,
+                                       "tossPBMC_only",
+                                       "keep"))) 
+to_print <- tiss_df %>%
+   DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+
+   cat("\n")
+  cat(' \n \n') ### this is the key!
+
+  
+  ####### now generate table with number of samples < 3 cells
+  
+  
+  
+           cat("##### ",paste0("table Num Samples at least 3 cells, per tissue"),"\n")
+cat("\n")
+
+samps3cells_df <- as.data.frame.matrix(table(seuratObj_to_use[[c(res_to_use, "sample")]])) %>%
+  rownames_to_column("cluster") %>%
+  ### make longer
+  tidyr::pivot_longer(!cluster, names_to = "sample", values_to = "numCells") %>%
+  ### add helper columns for LN and PBMC separately
+  ## first add tissue
+  dplyr::mutate(tissue = ifelse(grepl("LN",sample),
+                                "LN",
+                                ifelse(grepl("PBMC",sample),
+                                       "PBMC",
+                                       "none"))) %>%
+  ### group by cluster & tissue
+  group_by(cluster, tissue) %>%
+  dplyr::summarize(numSamps_atleast3Cells = sum(numCells > 2)) %>%
+  ### make wider
+  tidyr::pivot_wider(names_from = "tissue", values_from = "numSamps_atleast3Cells")
+  
+  
+                  
+to_print <- samps3cells_df %>%
+   DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+
+   cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+  
+  
+  ########### collect clusters to keep for each tissue
+  LN_clust_to_keep <- c(samps3cells_df$cluster[which(samps3cells_df$LN >= 8)]) ### at least 8/15 samples with 3+ cells (includes at least 20 total cells)
+  
+  PBMC_clust_to_keep <- c(samps3cells_df$cluster[which(samps3cells_df$PBMC >= 11)]) ### at least 11/22 samples with 3+ cells
+  
+
+```
+
+```{r trimSO_byComp, eval = evalTissTrimm}
+########## only need to do this once
+####### now trim
+  seuratObj_to_use <- subset(x = seuratObj_to_use, 
+                             subset = Tissue == "LN" & !!rlang::sym(res_to_use) %in% LN_clust_to_keep |
+                               Tissue == "PBMC" & !!rlang::sym(res_to_use) %in% PBMC_clust_to_keep)
+
+###### relevel respt4_rpca_ClustersWithSubs
+seuratObj_to_use$respt4_rpca_ClustersWithSubs <- factor(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs),
+                                                        c(intersect(levels(seuratObj_to_use$respt4_rpca_ClustersWithSubs),
+                                                                  union(LN_clust_to_keep,PBMC_clust_to_keep))))
+
+
+saveRDS(seuratObj_to_use, file.path(outputRData_dir, paste0("batch123_38samps_",suffix_to_use,"_tiss_trimmed_ann.rds")))
+
+```
+
+
+
+
+
+
+
+
+```{r setSO_fulltisstrimmed}
+
+suffix_to_use <- "rpca"
+default_assay_to_use <- "integrated"
+
+
+seuratObj_to_use <- readRDS(file.path(outputRData_dir, paste0("batch123_38samps_",suffix_to_use,"_tiss_trimmed_ann.rds")))
+
+
+
+######## add in round
+seuratObj_to_use$round <- str_after_first(seuratObj_to_use$Sample,"_") %>%
+  str_replace_all("LN_","round1_") %>%
+  str_replace_all("PBMC_","round1_") %>%
+  str_replace_all("PBMC2_","round2_") %>%
+  str_replace_all("MF30_PBMC3_","MF30_round3_") %>%
+  str_replace_all("MC73_PBMC3_","MC73_round3_") %>%
+  str_replace_all("MF07_PBMC3_","MF07_round3_") %>%
+  str_replace_all("MB59_PBMC3_PRE","MB59_round4_PRE") %>%
+  str_replace_all("MB59_PBMC3_DAY8","MB59_round4_DAY8") %>%
+  str_replace_all("MB59_PBMC3b_PRE","MB59_round5_PRE") %>%
+  str_replace_all("MB59_PBMC3_POST","MB59_round5_POST") %>%
+  str_replace_all("MC90_PBMC3_PRE","MC90_round4_PRE") %>%
+  str_replace_all("MC90_PBMC3_DAY8","MC90_round4_DAY8") %>%
+  str_replace_all("MC90_PBMC3_POST","MC90_round5_POST") %>%
+  str_replace_all("MB59_LN3_PRE","MB59_round4_PRE") %>%
+  str_replace_all("MB59_LN3_DAY8","MB59_round4_DAY8") %>%
+  str_replace_all("MC90_LN3_PRE","MC90_round4_PRE") %>%
+  str_replace_all("MC90_LN3_DAY8","MC90_round4_DAY8") %>%
+  str_replace_all("MC90_LN3_POST","MC90_round5_POST") %>%
+  str_replace_all("MC98_LN3_","MC98_round5_") %>%
+  str_replace_all("MF30_LN3_","MF30_round5_") %>%
+  str_after_first("_") %>%
+  str_before_last("_")
+
+
+
+
+
+seuratObj_to_use$round <- factor(seuratObj_to_use$round, c("round1","round2","round3","round4","round5"))
+
+
+
+DefaultAssay(object = seuratObj_to_use) <- default_assay_to_use
+
+name_to_use <- "integrated, full"
+
+
+clust_letter <- "F"
+res_prefix1 <- "SLM_int_snn_"
+
+```
+
+```{r setRes__withSubs_TissTrimmed}
+
+
+res_to_use <- "respt4_rpca_ClustersWithSubs"
+
+
+
+#  c(
+#                                                           #### bcells subclsuters
+#   "Bcell naive b0","Bcell naive b4","Bcell naive b7","Bcell naive b8",
+#                                                           "Bcell naive LN b6","Bcell naive LN b12","Bcell prolif LN b13",
+#                                                           "Bcell naive MF30 b9","Bcell naive MF30 b11",
+#                                                           "Bcell nonsw b1",
+#                                                           "Bcell sw b2","Bcell sw b10",
+#                                                           "Bcell mix b3",
+#                                                           "Bcell CD3 b5",
+#                                                           "Bcell plasmablast b14",
+#   
+#   ##### t.cells subclusters
+#   
+#   "CD4 naive l0","CD4 naive l11","CD4 naive l19",
+#                                                           "CD4 Treg l6","CD4 Th1 Th17 l9","CD4 Tfh l23",
+#                                                           "CD4 Tfh mix l1","CD4 Tfh mix l12","CD4 Tfh mix l13",
+#                                                           
+#                                                           "CD8 naive l2",
+#                                                           "CD8 Vd2 gd l4","CD8 gd l17","CD8 NK l5",
+#                                                           "CD8 MAIT l7",
+#                                                           
+#                                                           "CD8 DP gd l3","CD8 DP gd l24",
+#                                                           "CD8 DP prolif l20",     
+#                                                           
+#                                                           "DP naive l21","DP Th1 Th17 l14","DP B l27",
+# 
+#                                                           "DN l15","DN MAIT l25",
+#                                                           "DN CM Treg l16","DN B CM Treg l22",
+#                                                           "DN neut mye l18",
+#                                                           
+#                                                           "NK l10",
+#                                                           "CD3neg CD8 NK l8","CD3neg CD8 MS4A1 NK l26",
+#   
+# 
+#   #### keep from full subclustering
+#   
+#   "myeloid CL F4","myeloid IN NC F20","myeloid mDC F26","myeloid pDC F27",
+#   "Neutrophil F15","Platelet F17","Erythro F16","prog F28","GATA3 F30"
+#   
+# )
+  
+cols_to_use <- c( 
+  ### B cells
+#### naive
+  "lightblue1","lightblue3","darkslategray1","darkslategray3",
+  "lightblue4","skyblue4","darkslategray",
+ # "gray70","gray20", ###"Bcell naive MF30 b9","Bcell naive MF30 b11",
+  ## nonsw
+  "mediumpurple1",
+  ## sw
+  "purple3","purple4",
+  ## mix
+  "slateblue1",
+  ## cd3
+  "purple",
+  ## plasmablaste
+  "slateblue4",
+  
+  
+  ####### T cells
+  
+    ### CD4 T cells
+  "gold1","darkgoldenrod1","darkgoldenrod3",
+  "darkorange1","darkorange4",
+  "burlywood1","burlywood3","burlywood4","burlywood4",
+  
+  #### CD8 T
+  "orchid1","orchid3","orchid4","mediumorchid1","magenta3",
+  
+  ### CD8 DP T
+  "deeppink1","deeppink3","deeppink4",
+  
+  #### DP
+  "lightpink","lightpink3","lightpink4",
+  
+  #### DN
+  "tan4","magenta4","lightgoldenrod1",#"lightgoldenrod3", ### "DN B CM Treg l22",
+  "khaki4",
+  
+  #### NK/CD3neg  
+  "hotpink1","hotpink3","hotpink4",
+  
+  
+  
+  
+  
+  ### myeloid
+"green4","palegreen","olivedrab4","olivedrab2",
+
+### other
+"turquoise3",
+"dodgerblue4","skyblue1","dodgerblue2","darkblue"
+
+  
+)
+
+```
+
+### FULL POST-Subclustering TISSUE TRIMMED `r paste0(name_to_use)` - `r paste0(res_to_use)` {.tabset}
+
+
+#### UMAP
+``` {r celltypeassignment_plots_merge1__withSubsTT, ref.label=c('celltypeassignment_plots_merge1'), fig.width = 14, fig.height = 5}
+```
+
+#### UMAP (labeled)
+``` {r celltypeassignment_plots_mergeLabel1__withSubsTT, ref.label=c('celltypeassignment_plots_mergeLabel1'), fig.width = 14, fig.height = 5}
+```
+
+#### boxplot by time {.tabset}
+
+ignoring method
+
+``` {r boxplot_group1__withSubsTT, ref.label=c('boxplot_group1'), fig.height=15, fig.width = 10, results = 'asis'}
+```
+
+
+
+
+
+
+
+```{r addFINALNAMES, eval = evalAddFINALNAMES}
+
+
+############ replace this with using the ccrvb47_FINALNAMESonly.xlsx
+finalnames_df <- openxlsx::read.xlsx(file.path(parent_dir, "input_data", "ccrvb47_FINALNAMESonly.xlsx")) %>%
+  janitor::clean_names() %>%
+  dplyr::rename(final_name = final_name_051926) %>%
+  dplyr::mutate(dplyr::across(c(original_name, final_name,broad_category), trimws))
+
+## sanity check: flag any clusters that didn't find a match in the Excel file
+current_clusters <- unique(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs))
+unmatched <- dplyr::setdiff(current_clusters, finalnames_df$original_name)
+if (length(unmatched) > 0) {
+  warning("The following original names had no match in ccrvb47_FINALNAMESonly.xlsx: ",
+          paste(unmatched, collapse = ", "))
+}
+
+## map old cluster labels to final names via left_join
+seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname <- 
+  tibble::tibble(original_name = as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs)) %>%
+  dplyr::left_join(finalnames_df %>% dplyr::select(original_name, final_name),
+                    by = "original_name") %>%
+  dplyr::pull(final_name)
+
+#### factorize using the excel-defined order (NOT reversed so order is correct for UMAPs)
+level_order <- finalnames_df %>%
+  dplyr::arrange(final_order) %>%
+  dplyr::pull(final_name) #%>%
+ # rev()
+
+seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname <- factor(
+  seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname,
+  levels = level_order
+)
+
+
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname <- NA
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Neutrophil F15")] <- "LDN F15"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Platelet F17")] <- "Platelet F17"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "myeloid CL F4")] <- "CL mono F4"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "myeloid IN NC F20")] <- "NC mono F20"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "myeloid mDC F26")] <- "mDC F26"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "myeloid pDC F27")] <- "pDC F27"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive b0")] <- "B naive B0"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DP B l27")] <- "B L27"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive b4")] <- "B naive B4"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive b7")] <- "B naive B7"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell sw b2")] <- "B sw B2"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell nonsw b1")] <- "B nonsw B1"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive b8")] <- "B naive B8"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive LN b6")] <- "B GC B6"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell prolif LN b13")] <- "B GC prolif B13"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell plasmablast b14")] <- "Plasmablast B14"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell naive LN b12")] <- "B LN B12"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell CD3 b5")] <- "B CD3 B5"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell sw b10")] <- "B sw B10"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Bcell mix b3")] <- "B CD11c B3"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 naive l0")] <- "CD4 naive L0"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 naive l19")] <- "CD4 naive L19"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 naive l11")] <- "CD4 TCM L11"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Tfh mix l12")] <- "CD4 TCM L12" ### formerly "CD4 TEM L12"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Tfh mix l1")] <- "CD4 Tfh L1"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Tfh l23")] <- "CD4 GC Tfh L23"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Th1 Th17 l9")] <- "CD4 Th2 L9"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DP Th1 Th17 l14")] <- "CD4 Th17 L14"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Tfh mix l13")] <- "CD4 TEM L13"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD4 Treg l6")] <- "CD4 Treg L6"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 naive l2")] <- "CD8 naive L2"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DP naive l21")] <- "DP naive L21"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DN CM Treg l16")] <- "DN TCM L16"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 DP gd l24")] <- "CD8 TEM L24"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 Vd2 gd l4")] <- "CD8 TEM L4"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "NK l10")] <- "NKT L10"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 DP gd l3")] <- "CD8 TEM L3"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 NK l5")] <- "NKT L5"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 gd l17")] <- "CD8 TCM L17"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 DP prolif l20")] <- "CD8 TEM prolif L20"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD3neg CD8 MS4A1 NK l26")] <- "NK.ILC L26"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD3neg CD8 NK l8")] <- "NK L8"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DN MAIT l25")] <- "DN MAIT L25"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "CD8 MAIT l7")] <- "CD8 MAIT L7"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "GATA3 F30")] <- "GATA3 F30"
+# 
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "prog F28")] <- "Prog F28"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "Erythro F16")] <- "Erythro F16"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DN l15")] <- "DN L15"
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname[which(as.character(seuratObj_to_use$respt4_rpca_ClustersWithSubs) == "DN neut mye l18")] <- "DN neut mye L18"
+# 
+# #### factorize
+# seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname <- factor(seuratObj_to_use$respt4_rpca_ClustersWithSubs_FINALname, c( ### reverse so myeloid will be on top of dotplots
+#   "LDN F15", "Platelet F17", "CL mono F4", "NC mono F20", "mDC F26", "pDC F27",
+# 
+#   "B naive B0","B naive B4","B naive B7","B LN B12","B naive B8",
+#   "B L27","B CD3 B5","B CD11c B3","B GC B6","B GC prolif B13",
+#   "B nonsw B1","B sw B2","B sw B10","Plasmablast B14",
+# 
+#   "CD4 naive L0","CD4 naive L19","CD4 Tfh L1","CD4 GC Tfh L23",
+#   "CD4 TCM L11","CD4 TCM L12","CD4 TEM L13","CD4 Th2 L9","CD4 Th17 L14",
+#   "CD4 Treg L6",
+#   
+# 
+#   "CD8 naive L2","DP naive L21","CD8 TCM L17",
+#   "CD8 TEM L24","CD8 TEM L4","CD8 TEM L3",
+#   "CD8 TEM prolif L20","DN MAIT L25","CD8 MAIT L7",
+#   "DN TCM L16",
+#   
+#   "NKT L5","NKT L10","NK L8","NK.ILC L26",
+# 
+#    "GATA3 F30","Prog F28",
+# 
+#   "Erythro F16", "DN L15", "DN neut mye L18"
+# ))
+
+
+saveRDS(seuratObj_to_use, file.path(outputRData_dir, paste0("batch123_38samps_",suffix_to_use,"_tiss_trimmed_ann.rds")))
+
+
+```
+
+
+```{r setSO_fulltisstrimmed__again, ref.label=c('setSO_fulltisstrimmed')}
+
+```
+
+``` {r setResFINAL}
+res_to_use <- "respt4_rpca_ClustersWithSubs_FINALname"
+
+
+
+
+cols_to_use <- c( 
+  
+  "turquoise3","dodgerblue4",
+  "green4","palegreen","olivedrab4","olivedrab2",
+  
+  #"B naive B0","B naive B4","B naive B7","B LN B12","B naive B8",
+  "lightblue1","lightblue3","darkslategray1","skyblue4","darkslategray3",
+  #"B L27","B CD3 B5","B CD11c B3",
+  "lightpink4","purple","slateblue1",
+  #"B GC B6","B GC prolif B13",
+  "lightblue4","darkslategray",
+  
+  #"B nonsw B1",
+  "mediumpurple1",
+  #"B sw B2","B sw B10",
+  "purple3","purple4",
+  #"Plasmablast B14",
+  "slateblue4",
+  
+  
+  
+  #"CD4 naive L0","CD4 naive L19","CD4 Tfh L1","CD4 GC Tfh L23",
+  "gold1","darkgoldenrod3","burlywood3","burlywood1",
+  #"CD4 TCM L11","CD4 TCM L12","CD4 TEM L13","CD4 Th2 L9","DP Th17 L14",
+  "darkgoldenrod1","burlywood4","tan4","darkorange4","lightpink3",
+  #"CD4 Treg L6",
+  "darkorange1",
+  
+  
+   #"CD8 naive L2","DP naive L21","CD8 TCM L17",
+    "orchid1","lightpink","orchid4",
+  #"CD8 TEM L24","CD8 TEM L4","CD8 TEM L3","CD8 TEM prolif L20",
+   "deeppink3","orchid3","deeppink1","deeppink4",
+  
+  
+  #"CD8 MAIT L7",# "DN MAIT L25","DN TCM L16",
+  "magenta3","magenta4","lightgoldenrod1",
+  
+  #"DN L15", "DN neut mye L18"
+  "lemonchiffon3","khaki4",
+  
+  # "NKT L5","NKT L10","NK L8","NK.ILC L26",
+  "mediumorchid1","hotpink1","hotpink3","hotpink4",
+  #  "GATA3 F30","Prog F28",
+   "darkblue","dodgerblue2",
+  # "Erythro F16", 
+
+  
+  "skyblue1"
+  
+ 
+
+  
+)
+
+
+```
+
+
+
+### FULL POST-Subclustering TISSUE TRIMMED `r paste0(name_to_use)` - `r paste0(res_to_use)` {.tabset}
+
+
+#### UMAP
+``` {r celltypeassignment_plots_merge1__withSubsTT_finalnames, ref.label=c('celltypeassignment_plots_merge1'), fig.width = 14, fig.height = 5}
+```
+
+#### UMAP (labeled)
+``` {r celltypeassignment_plots_mergeLabel1__withSubsTT_finalnames, ref.label=c('celltypeassignment_plots_mergeLabel1'), fig.width = 14, fig.height = 5}
+```
+
+#### boxplot by time {.tabset}
+
+ignoring method
+
+``` {r boxplot_group1__withSubsTT_finalnames, ref.label=c('boxplot_group1'), fig.height=15, fig.width = 10, results = 'asis'}
+```
+
+
+
+
+
+
+
+
+
+
+
+``` {bash RunThisRMD, eval = FALSE}
+## 38 prefilter .rds
+cd /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/shell_scripts/
+
+##### to submit this Rmd
+sbatch --cpus-per-task=12 --mem=800g --partition largemem --time 00-02:00:00 /data/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Felber/shell_scripts/ccrvb47_LIONscRNAseq_batch123_38samps_QCBatchCorrectionSubclustering_KCG.sh
+#35264670 @8:44pm 11/9/26, with saving all objects - timed out at 21/223 chunks
+#35347052 @1:18pm 11/10/26, after 9 hrs got stuck on prepSO_rpca, max 300G used to that point
+#35643564 @12:55am 11/13/26, only true for prepSO_rpca onward, took 11 hrs before failing at Bcell subset reload, max 570G used for this middle section
+#35688719 @12:08pm 11/13/26, only true for Tcell subset, subsToFull, tiss trimming; 
+#35980580 @10:48am 11/16/26 with tiss trimming=TRUE since last run timed out at 2hrs, took 6 hrs and ~300Gb
+#36060268 @8:17pm `11/16/26 with only eval_setSO=TRUE, rest false, takes 2.5hrs
+#36144967 @1:29pm 11/17/26 with only evalSubclustering & evalSaveSubSOs = TRUE
+# 36185581 @8:23pm 11/17/26 with evalSaveSubSOs = TRUE, took 6+ hours and upto 550G
+#36259139 @2:06pm 11/18/26 with no eval = TRUE (except setSO)
+newwall --jobid 36259139 --time 10-00:00:00
+cat ccrvb47_38samps_scrnaQCBCSubRMD_out.log 
+tail ccrvb47_38samps_scrnaQCBCSubRMD_out.log 
+```
+
