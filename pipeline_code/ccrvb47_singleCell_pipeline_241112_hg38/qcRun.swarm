@@ -1,0 +1,5 @@
+bash setupQC.bash MC73_PBMC3_POST
+bash setupQC.bash MC73_PBMC3_DAY8
+bash setupQC.bash MF30_PBMC3_DAY8
+bash setupQC.bash MF07_PBMC3_DAY8
+
