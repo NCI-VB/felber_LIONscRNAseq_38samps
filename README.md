@@ -32,6 +32,7 @@ This repo contains the raw data and code used to produce the figures in the manu
     - `singleCell_pipeline_20250210_hg38_KCG` - contains scripts for Batch 1, 2, 4, and 5 (remaining 34 samples)
 
 - notes on use of pipeline code for processing, QC, merge, and batch correction, as well as code for broad clustering, subclustering and trimming of clusters by tissue can be found in `ccrvb47_LIONscRNAseq_batch123_38samps_QCBatchCorrectionSubclustering_KCG.Rmd`
+    - the fully rendered report to follow this prep Rmd can be found in `outputs/ccrvb47_LIONscRNAseq_batch123_38samps_QCBatchCorrectionSubclustering_KCG.html`
 
 - all downstream analysis code to produce each figure panel can be found in `ccrvb47_MSforFigures_FINALNAMES_V2_KCG.Rmd`
     - `bin` directory contains additional scripts referred to in chunks `run_1vsRestDEGs`, `run_timeDEGs` and `CellChatPrep`
