@@ -1,0 +1,3 @@
+bash runCCA_batch123_38samps.bash
+bash runHarmony_batch123_38samps.bash
+bash runRPCA_batch123_38samps.bash
